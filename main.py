@@ -1,7 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – main.py
+# RajanTradeAutomation – main.py (FINAL – WAITING MODE)
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | ONLY CANDLE LOGIC ADDED
 # ============================================================
 
 import os
@@ -9,13 +8,10 @@ import time
 import threading
 from flask import Flask, jsonify, request
 
-# ------------------------------------------------------------
-# Basic Logs
-# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
-# ENV CHECK
+# ENV
 # ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
@@ -27,23 +23,24 @@ print(
     FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
 )
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-    raise Exception("❌ FYERS ENV variables missing")
+if not FYERS_CLIENT_ID:
+    raise Exception("❌ FYERS_CLIENT_ID missing")
+
+FYERS_READY = bool(FYERS_ACCESS_TOKEN)
+if not FYERS_READY:
+    print("⚠ FYERS token missing – server running in WAITING MODE")
 
 # ------------------------------------------------------------
-# Flask App (Ping + Redirects)
+# Flask App
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
-
-@app.route("/callback")
-def fyers_callback():
-    auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
-    return jsonify({"status": "callback_received", "auth_code": auth_code})
+    return jsonify({
+        "status": "ok",
+        "fyers_ready": FYERS_READY
+    })
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -61,19 +58,13 @@ def fyers_redirect():
     })
 
 # ------------------------------------------------------------
-# FYERS WebSocket
+# FYERS WebSocket + 5 MIN CANDLE
 # ------------------------------------------------------------
-print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ data_ws IMPORT SUCCESS")
 
-# ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE (LOCAL, PROVEN)
-# ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes
-
-candles = {}          # symbol -> running candle
-last_candle_vol = {}  # symbol -> last candle cumulative volume
+CANDLE_INTERVAL = 300
+candles = {}
+last_candle_vol = {}
 
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
@@ -85,7 +76,6 @@ def close_candle(symbol, c):
 
     print(
         f"\n🟩 5m CANDLE CLOSED | {symbol}"
-        f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
         f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
         f"C:{c['close']} V:{candle_vol}"
         f"\n-------------------------------"
@@ -106,7 +96,6 @@ def update_candle_from_tick(msg):
     start = candle_start(ts)
     c = candles.get(symbol)
 
-    # NEW CANDLE
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
@@ -121,45 +110,13 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # UPDATE RUNNING CANDLE
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (WS FLOW UNCHANGED)
-# ------------------------------------------------------------
-def on_message(message):
-    print("📩 WS MESSAGE:", message)
-    update_candle_from_tick(message)   # ✅ ONLY ADDITION
-
-def on_error(message):
-    print("❌ WS ERROR:", message)
-
-def on_close(message):
-    print("🔌 WS CLOSED:", message)
-
-def on_connect():
-    print("🔗 WS CONNECTED")
-
-    symbols = [
-        "NSE:SBIN-EQ",
-        "NSE:RELIANCE-EQ",
-        "NSE:VEDL-EQ",
-        "NSE:AXISBANK-EQ",
-        "NSE:KOTAKBANK-EQ"
-    ]
-
-    print("📡 Subscribing symbols:", symbols)
-
-    fyers_ws.subscribe(
-        symbols=symbols,
-        data_type="SymbolUpdate"
-    )
-
-# ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING) – 🔒 UNCHANGED
+# WS START (ONLY IF TOKEN EXISTS)
 # ------------------------------------------------------------
 def start_ws():
     try:
@@ -168,25 +125,24 @@ def start_ws():
         global fyers_ws
         fyers_ws = data_ws.FyersDataSocket(
             access_token=FYERS_ACCESS_TOKEN,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_connect=on_connect,
+            on_message=lambda m: update_candle_from_tick(m),
+            on_error=lambda e: print("❌ WS ERROR:", e),
+            on_close=lambda m: print("🔌 WS CLOSED:", m),
+            on_connect=lambda: print("🔗 WS CONNECTED"),
             reconnect=True
         )
 
-        print("✅ FyersDataSocket CREATED")
         fyers_ws.connect()
         print("📶 WS CONNECT CALLED")
 
     except Exception as e:
         print("🔥 WS THREAD CRASHED:", e)
 
-ws_thread = threading.Thread(target=start_ws, daemon=True)
-ws_thread.start()
+if FYERS_READY:
+    threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# Start Flask (MAIN THREAD)
+# START FLASK
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
