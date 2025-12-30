@@ -1,14 +1,17 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# OLD STABLE WS + MINIMAL FIX (keep_running)
+# FINAL STABLE VERSION (CLIENT_ID:TOKEN + keep_running)
 # ============================================================
 
 import os
 import time
 import threading
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 
+# ------------------------------------------------------------
+# BASIC LOG
+# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
@@ -28,7 +31,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App
+# FLASK APP (KEEP RENDER ALIVE)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -37,16 +40,16 @@ def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
 # ------------------------------------------------------------
-# FYERS WebSocket
+# FYERS WEBSOCKET IMPORT
 # ------------------------------------------------------------
 print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 5-MIN CANDLE ENGINE (UNCHANGED)
+# 5-MIN CANDLE ENGINE
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300
+CANDLE_INTERVAL = 300  # 5 minutes
 candles = {}
 last_candle_vol = {}
 
@@ -60,8 +63,10 @@ def close_candle(symbol, c):
 
     print(
         f"\n🟩 5m CANDLE CLOSED | {symbol}"
+        f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
         f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
         f"C:{c['close']} V:{candle_vol}"
+        f"\n-------------------------------"
     )
 
 def update_candle_from_tick(msg):
@@ -82,6 +87,7 @@ def update_candle_from_tick(msg):
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
+
         candles[symbol] = {
             "start": start,
             "open": ltp,
@@ -98,7 +104,7 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks
+# WS CALLBACKS
 # ------------------------------------------------------------
 def on_message(message):
     print("📩 WS MESSAGE:", message)
@@ -125,7 +131,7 @@ def on_connect():
     fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ------------------------------------------------------------
-# Start WebSocket (FIXED)
+# START WEBSOCKET (FINAL FIXED)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -133,7 +139,7 @@ def start_ws():
         print("🧵 WS THREAD STARTED")
 
         fyers_ws = data_ws.FyersDataSocket(
-            access_token=FYERS_ACCESS_TOKEN,
+            access_token=f"{FYERS_CLIENT_ID}:{FYERS_ACCESS_TOKEN}",  # 🔥 CRITICAL
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
@@ -144,7 +150,7 @@ def start_ws():
         print("📶 WS CONNECT CALLED")
         fyers_ws.connect()
 
-        # 🔥 THIS IS THE ONLY REQUIRED FIX
+        # 🔥 REQUIRED FOR FYERS SDK v3
         fyers_ws.keep_running()
 
     except Exception as e:
@@ -153,7 +159,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# Start Flask
+# START FLASK
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
