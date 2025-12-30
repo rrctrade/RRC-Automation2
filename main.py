@@ -1,7 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL / RENDER SAFE)
-# FYERS OAUTH + LIVE WS + 5 MIN CANDLE
-# WS keep_running() FIX APPLIED
+# RajanTradeAutomation – main.py
+# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
+# OLD STABLE WS + MINIMAL FIX (keep_running)
 # ============================================================
 
 import os
@@ -12,98 +12,39 @@ from flask import Flask, jsonify, request
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
-# ENV CHECK (SAFE FOR OAUTH PHASE)
+# ENV CHECK
 # ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
-print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID[:10] + "..." if FYERS_CLIENT_ID else "❌ MISSING")
-print("FYERS_SECRET_KEY =", "✅ SET" if FYERS_SECRET_KEY else "❌ MISSING")
+print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
 print(
     "FYERS_ACCESS_TOKEN prefix =",
-    FYERS_ACCESS_TOKEN[:20] + "..." if FYERS_ACCESS_TOKEN else "❌ MISSING"
+    FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
 )
 
-if not FYERS_CLIENT_ID or not FYERS_SECRET_KEY:
-    raise Exception("❌ FYERS CLIENT ID / SECRET KEY missing")
-
-if not FYERS_ACCESS_TOKEN:
-    print("⚠️ FYERS_ACCESS_TOKEN missing – OAuth activation required")
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
+    raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# FYERS IMPORTS (v3 CORRECT)
-# ------------------------------------------------------------
-from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws
-
-# ------------------------------------------------------------
-# FLASK APP
+# Flask App
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "RajanTradeAutomation",
-        "ws_active": bool(FYERS_ACCESS_TOKEN)
-    })
+    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
 # ------------------------------------------------------------
-# ACTIVATE → FYERS LOGIN
+# FYERS WebSocket
 # ------------------------------------------------------------
-@app.route("/activate")
-def activate():
-    session = fyersModel.SessionModel(
-        client_id=FYERS_CLIENT_ID,
-        secret_key=FYERS_SECRET_KEY,
-        redirect_uri="https://rrc-automation2.onrender.com/fyers-redirect",
-        response_type="code",
-        grant_type="authorization_code"
-    )
-
-    auth_url = session.generate_authcode()
-    print("🔑 ACTIVATE URL:", auth_url)
-
-    return jsonify({"url": auth_url})
+print("📦 Importing fyers_apiv3 WebSocket")
+from fyers_apiv3.FyersWebsocket import data_ws
+print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# FYERS REDIRECT → TOKEN
-# ------------------------------------------------------------
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    auth_code = request.args.get("auth_code") or request.args.get("code")
-    print("🔁 FYERS REDIRECT HIT | AUTH CODE =", auth_code)
-
-    if not auth_code:
-        return jsonify({"error": "auth_code_missing"})
-
-    try:
-        session = fyersModel.SessionModel(
-            client_id=FYERS_CLIENT_ID,
-            secret_key=FYERS_SECRET_KEY,
-            redirect_uri="https://rrc-automation2.onrender.com/fyers-redirect",
-            grant_type="authorization_code"
-        )
-        session.set_token(auth_code)
-        response = session.generate_token()
-        token = response.get("access_token")
-
-        print("✅ FYERS ACCESS TOKEN GENERATED")
-
-        return jsonify({
-            "status": "activated",
-            "next": "Save token as FYERS_ACCESS_TOKEN in Render ENV and redeploy"
-        })
-
-    except Exception as e:
-        print("❌ TOKEN ERROR:", e)
-        return jsonify({"error": str(e)}), 500
-
-# ------------------------------------------------------------
-# 5 MIN CANDLE ENGINE
+# 5-MIN CANDLE ENGINE (UNCHANGED)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
 candles = {}
@@ -118,10 +59,9 @@ def close_candle(symbol, c):
     last_candle_vol[symbol] = c["cum_vol"]
 
     print(
-        f"\n🟩 5M CANDLE CLOSED | {symbol}"
+        f"\n🟩 5m CANDLE CLOSED | {symbol}"
         f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
         f"C:{c['close']} V:{candle_vol}"
-        f"\n-------------------------------"
     )
 
 def update_candle_from_tick(msg):
@@ -158,10 +98,10 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# FYERS WEBSOCKET CALLBACKS
+# WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 TICK:", message)
+    print("📩 WS MESSAGE:", message)
     update_candle_from_tick(message)
 
 def on_error(message):
@@ -181,11 +121,11 @@ def on_connect():
         "NSE:KOTAKBANK-EQ"
     ]
 
-    print("📡 Subscribing:", symbols)
+    print("📡 Subscribing symbols:", symbols)
     fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ------------------------------------------------------------
-# START WEBSOCKET (KEEP_RUNNING FIX)
+# Start WebSocket (FIXED)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -201,24 +141,21 @@ def start_ws():
             reconnect=True
         )
 
-        print("📡 Calling WS connect()")
+        print("📶 WS CONNECT CALLED")
         fyers_ws.connect()
 
-        print("🔁 WS keep_running()")
-        fyers_ws.keep_running()   # 🔥 CRITICAL FIX
+        # 🔥 THIS IS THE ONLY REQUIRED FIX
+        fyers_ws.keep_running()
 
     except Exception as e:
-        print("🔥 WS CRASH:", e)
+        print("🔥 WS THREAD CRASHED:", e)
 
-if FYERS_ACCESS_TOKEN:
-    threading.Thread(target=start_ws, daemon=True).start()
-else:
-    print("⏳ WS WAITING – OPEN /activate")
+threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# START FLASK SERVER
+# Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Flask starting on port {port}")
+    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
