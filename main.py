@@ -1,6 +1,5 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL ASSEMBLED VERSION)
-# Phase-0 + Phase-1 + Phase-2 (LOCKED)
+# RajanTradeAutomation – main.py (FINAL FULL UNIVERSE VERSION)
 # ============================================================
 
 import os
@@ -36,16 +35,33 @@ def health():
 def fyers_callback():
     return jsonify({"status": "callback_received"})
 
+# REQUIRED – matches your FYERS redirect URI
+@app.route("/fyers-redirect")
+def fyers_redirect():
+    auth_code = request.args.get("auth_code") or request.args.get("code")
+    return jsonify({"status": "redirect_received", "auth_code": auth_code})
+
 # ------------------------------------------------------------
 # FYERS WS
 # ------------------------------------------------------------
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ------------------------------------------------------------
+# IMPORT FULL UNIVERSE
+# ------------------------------------------------------------
+from sector_mapping import SECTOR_MAP
+
+# build UNIQUE stock universe
+ALL_SYMBOLS = sorted(
+    {symbol for stocks in SECTOR_MAP.values() for symbol in stocks}
+)
+
+print(f"📦 Total symbols to subscribe: {len(ALL_SYMBOLS)}")
+
+# ------------------------------------------------------------
 # CANDLE ENGINE (LOCKED)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
-
 candles = {}
 last_candle_vol = {}
 
@@ -94,7 +110,7 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# STEP-B : SELECTION + UNSUBSCRIBE STATE
+# SELECTION + UNSUBSCRIBE STATE
 # ------------------------------------------------------------
 SELECTION_DONE = False
 UNSUBSCRIBE_DONE = False
@@ -105,7 +121,7 @@ def on_sector_selection_complete(result):
     global SELECTION_DONE, SELECTED_STOCKS
     SELECTED_STOCKS = set(result.get("selected_stocks", []))
     SELECTION_DONE = True
-    print("✅ Sector selection complete")
+    print(f"✅ Sector selection done | Selected = {len(SELECTED_STOCKS)}")
 
 def atomic_unsubscribe_and_delete():
     global UNSUBSCRIBE_DONE
@@ -117,8 +133,7 @@ def atomic_unsubscribe_and_delete():
         if not SELECTION_DONE or UNSUBSCRIBE_DONE:
             return
 
-        all_syms = set(candles.keys())
-        non_selected = all_syms - SELECTED_STOCKS
+        non_selected = set(candles.keys()) - SELECTED_STOCKS
 
         if not non_selected:
             UNSUBSCRIBE_DONE = True
@@ -137,7 +152,7 @@ def atomic_unsubscribe_and_delete():
             last_candle_vol.pop(s, None)
 
         UNSUBSCRIBE_DONE = True
-        print("✂️ Unsubscribed + Deleted non-selected stocks")
+        print(f"✂️ Unsubscribed & deleted {len(non_selected)} stocks")
 
 # ------------------------------------------------------------
 # WS CALLBACKS
@@ -155,18 +170,8 @@ def on_close(msg):
 def on_connect():
     global fyers_ws
     print("🔗 WS CONNECTED")
-
-    # TEMP – 5 STOCKS (later expand to 200)
-    symbols = [
-        "NSE:SBIN-EQ",
-        "NSE:RELIANCE-EQ",
-        "NSE:VEDL-EQ",
-        "NSE:AXISBANK-EQ",
-        "NSE:KOTAKBANK-EQ",
-    ]
-
     fyers_ws.subscribe(
-        symbols=symbols,
+        symbols=ALL_SYMBOLS,
         data_type="SymbolUpdate"
     )
 
@@ -188,7 +193,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# STEP-C : SECTOR ENGINE @ 09:25
+# SECTOR ENGINE @ 09:25
 # ------------------------------------------------------------
 from sector_engine import run_sector_bias
 
