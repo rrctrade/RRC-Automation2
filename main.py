@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py (FINAL / RENDER SAFE)
-# FYERS OAUTH (SAFE) + LIVE WS + 5 MIN CANDLE
+# FYERS OAUTH + LIVE WS + 5 MIN CANDLE
+# WS keep_running() FIX APPLIED
 # ============================================================
 
 import os
@@ -25,7 +26,6 @@ print(
     FYERS_ACCESS_TOKEN[:20] + "..." if FYERS_ACCESS_TOKEN else "❌ MISSING"
 )
 
-# ❗ Only CLIENT_ID + SECRET_KEY are mandatory to start app
 if not FYERS_CLIENT_ID or not FYERS_SECRET_KEY:
     raise Exception("❌ FYERS CLIENT ID / SECRET KEY missing")
 
@@ -33,7 +33,7 @@ if not FYERS_ACCESS_TOKEN:
     print("⚠️ FYERS_ACCESS_TOKEN missing – OAuth activation required")
 
 # ------------------------------------------------------------
-# FYERS IMPORTS (CORRECT v3)
+# FYERS IMPORTS (v3 CORRECT)
 # ------------------------------------------------------------
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -52,7 +52,7 @@ def health():
     })
 
 # ------------------------------------------------------------
-# ACTIVATE → FYERS LOGIN PAGE
+# ACTIVATE → FYERS LOGIN
 # ------------------------------------------------------------
 @app.route("/activate")
 def activate():
@@ -67,13 +67,10 @@ def activate():
     auth_url = session.generate_authcode()
     print("🔑 ACTIVATE URL:", auth_url)
 
-    return jsonify({
-        "status": "activation_required",
-        "url": auth_url
-    })
+    return jsonify({"url": auth_url})
 
 # ------------------------------------------------------------
-# REDIRECT → ACCESS TOKEN GENERATION
+# FYERS REDIRECT → TOKEN
 # ------------------------------------------------------------
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -92,15 +89,13 @@ def fyers_redirect():
         )
         session.set_token(auth_code)
         response = session.generate_token()
-
         token = response.get("access_token")
 
-        print("✅ FYERS ACCESS TOKEN GENERATED:", token[:20], "...")
+        print("✅ FYERS ACCESS TOKEN GENERATED")
 
         return jsonify({
             "status": "activated",
-            "token_preview": token[:20],
-            "next": "Save this token as FYERS_ACCESS_TOKEN in Render ENV and redeploy"
+            "next": "Save token as FYERS_ACCESS_TOKEN in Render ENV and redeploy"
         })
 
     except Exception as e:
@@ -108,10 +103,9 @@ def fyers_redirect():
         return jsonify({"error": str(e)}), 500
 
 # ------------------------------------------------------------
-# 5-MIN CANDLE ENGINE (PROVEN)
+# 5 MIN CANDLE ENGINE
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes
-
+CANDLE_INTERVAL = 300
 candles = {}
 last_candle_vol = {}
 
@@ -125,7 +119,8 @@ def close_candle(symbol, c):
 
     print(
         f"\n🟩 5M CANDLE CLOSED | {symbol}"
-        f"\nO:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{candle_vol}"
+        f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
+        f"C:{c['close']} V:{candle_vol}"
         f"\n-------------------------------"
     )
 
@@ -173,7 +168,7 @@ def on_error(message):
     print("❌ WS ERROR:", message)
 
 def on_close(message):
-    print("🔌 WS CLOSED")
+    print("🔌 WS CLOSED:", message)
 
 def on_connect():
     print("🔗 WS CONNECTED")
@@ -187,14 +182,10 @@ def on_connect():
     ]
 
     print("📡 Subscribing:", symbols)
-
-    fyers_ws.subscribe(
-        symbols=symbols,
-        data_type="SymbolUpdate"
-    )
+    fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ------------------------------------------------------------
-# START WEBSOCKET (ONLY IF TOKEN EXISTS)
+# START WEBSOCKET (KEEP_RUNNING FIX)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -210,8 +201,11 @@ def start_ws():
             reconnect=True
         )
 
+        print("📡 Calling WS connect()")
         fyers_ws.connect()
-        print("📶 WS CONNECT CALLED")
+
+        print("🔁 WS keep_running()")
+        fyers_ws.keep_running()   # 🔥 CRITICAL FIX
 
     except Exception as e:
         print("🔥 WS CRASH:", e)
