@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py (FINAL / RENDER SAFE)
-# FYERS OAUTH + LIVE TICK WS + 5 MIN CANDLE
+# FYERS OAUTH (SAFE) + LIVE WS + 5 MIN CANDLE
 # ============================================================
 
 import os
@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
-# ENV CHECK
+# ENV CHECK (SAFE FOR OAUTH PHASE)
 # ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
@@ -20,13 +20,20 @@ FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID[:10] + "..." if FYERS_CLIENT_ID else "❌ MISSING")
 print("FYERS_SECRET_KEY =", "✅ SET" if FYERS_SECRET_KEY else "❌ MISSING")
-print("FYERS_ACCESS_TOKEN =", FYERS_ACCESS_TOKEN[:20] + "..." if FYERS_ACCESS_TOKEN else "❌ MISSING")
+print(
+    "FYERS_ACCESS_TOKEN prefix =",
+    FYERS_ACCESS_TOKEN[:20] + "..." if FYERS_ACCESS_TOKEN else "❌ MISSING"
+)
 
+# ❗ Only CLIENT_ID + SECRET_KEY are mandatory to start app
 if not FYERS_CLIENT_ID or not FYERS_SECRET_KEY:
     raise Exception("❌ FYERS CLIENT ID / SECRET KEY missing")
 
+if not FYERS_ACCESS_TOKEN:
+    print("⚠️ FYERS_ACCESS_TOKEN missing – OAuth activation required")
+
 # ------------------------------------------------------------
-# FYERS IMPORTS (CORRECT FOR v3)
+# FYERS IMPORTS (CORRECT v3)
 # ------------------------------------------------------------
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -41,11 +48,11 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "RajanTradeAutomation",
-        "ws_ready": bool(FYERS_ACCESS_TOKEN)
+        "ws_active": bool(FYERS_ACCESS_TOKEN)
     })
 
 # ------------------------------------------------------------
-# ACTIVATE → FYERS PERMISSION PAGE
+# ACTIVATE → FYERS LOGIN PAGE
 # ------------------------------------------------------------
 @app.route("/activate")
 def activate():
@@ -66,7 +73,7 @@ def activate():
     })
 
 # ------------------------------------------------------------
-# REDIRECT → ACCESS TOKEN
+# REDIRECT → ACCESS TOKEN GENERATION
 # ------------------------------------------------------------
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -88,7 +95,7 @@ def fyers_redirect():
 
         token = response.get("access_token")
 
-        print("✅ FYERS TOKEN GENERATED:", token[:20], "...")
+        print("✅ FYERS ACCESS TOKEN GENERATED:", token[:20], "...")
 
         return jsonify({
             "status": "activated",
@@ -101,7 +108,7 @@ def fyers_redirect():
         return jsonify({"error": str(e)}), 500
 
 # ------------------------------------------------------------
-# 5 MIN CANDLE ENGINE (PROVEN)
+# 5-MIN CANDLE ENGINE (PROVEN)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
@@ -187,7 +194,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# START WEBSOCKET (NON BLOCKING)
+# START WEBSOCKET (ONLY IF TOKEN EXISTS)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
