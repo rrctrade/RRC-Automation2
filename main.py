@@ -1,114 +1,144 @@
 # ============================================================
-# RajanTradeAutomation – main.py
-# FINAL FIXED VERSION
-# Tick + Candle engine with Settings-based timing
+# RajanTradeAutomation - main.py
+# FINAL COMPLETE VERSION
+# - FYERS Redirect URI included
+# - Settings based Tick + Bias time
+# - Proven 5-min Candle Engine
 # ============================================================
 
 import os
 import time
 import threading
 import requests
-from datetime import datetime, time as dtime
+from datetime import datetime
 import pytz
-
-from flask import Flask
-
+from flask import Flask, request, jsonify
 from fyers_apiv3.FyersWebsocket import data_ws
 
-from sector_engine import run_sector_bias
 from sector_mapping import SECTOR_MAP
+from sector_engine import run_sector_bias
 
-# ============================================================
-# BASIC
-# ============================================================
-
-IST = pytz.timezone("Asia/Kolkata")
-
+# ------------------------------------------------------------
+# ENV
+# ------------------------------------------------------------
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL")
 
+IST = pytz.timezone("Asia/Kolkata")
+CANDLE_INTERVAL = 300  # 5 minutes
+
+# ------------------------------------------------------------
+# FLASK APP
+# ------------------------------------------------------------
 app = Flask(__name__)
 
-# ============================================================
-# LOGGING → GOOGLE SHEETS (Logs sheet)
-# ============================================================
+@app.route("/")
+def health():
+    return jsonify({"status": "ok"})
 
-def log_info(msg):
-    print(msg)
-    try:
-        requests.post(
-            WEBAPP_URL,
-            json={
-                "action": "pushState",
-                "payload": {
-                    "items": [{
-                        "key": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
-                        "value": msg
-                    }]
-                }
-            },
-            timeout=3
-        )
-    except:
-        pass
+# REQUIRED FOR FYERS APP
+@app.route("/callback")
+def fyers_callback():
+    return jsonify({"status": "callback_received"})
 
-# ============================================================
+@app.route("/fyers-redirect")
+def fyers_redirect():
+    auth_code = request.args.get("auth_code") or request.args.get("code")
+    return jsonify({
+        "status": "redirect_received",
+        "auth_code": auth_code
+    })
+
+# ------------------------------------------------------------
 # SETTINGS
-# ============================================================
-
+# ------------------------------------------------------------
 def load_settings():
-    res = requests.post(
-        WEBAPP_URL,
-        json={"action": "getSettings"},
-        timeout=5
-    ).json()
+    try:
+        r = requests.post(
+            WEBAPP_URL,
+            json={"action": "getSettings"},
+            timeout=5
+        )
+        return r.json().get("settings", {})
+    except Exception as e:
+        print("SETTINGS_LOAD_ERROR", e)
+        return {}
 
-    settings = res.get("settings", {})
-    log_info("SETTINGS_LOADED")
-    return settings
+def time_to_sec(t):
+    h, m, s = map(int, t.split(":"))
+    return h * 3600 + m * 60 + s
 
-def parse_time(tstr):
-    h, m, s = map(int, tstr.split(":"))
-    return dtime(h, m, s)
+# ------------------------------------------------------------
+# CANDLE ENGINE (PROVEN)
+# ------------------------------------------------------------
+candles = {}
+last_cum_vol = {}
 
-# ============================================================
-# GLOBAL STATE
-# ============================================================
+def candle_start(ts):
+    return ts - (ts % CANDLE_INTERVAL)
 
-settings = {}
-tick_start_time = None
-bias_time = None
+def close_candle(symbol, c):
+    prev = last_cum_vol.get(symbol, c["cum_vol"])
+    vol = c["cum_vol"] - prev
+    last_cum_vol[symbol] = c["cum_vol"]
 
-tick_engine_started = False
-bias_done = False
+    print(
+        f"5M_CANDLE | {symbol} | "
+        f"O:{c['open']} H:{c['high']} "
+        f"L:{c['low']} C:{c['close']} V:{vol}"
+    )
 
-# ============================================================
+def update_candle(msg):
+    symbol = msg.get("symbol")
+    ltp = msg.get("ltp")
+    vol = msg.get("vol_traded_today")
+    ts = msg.get("exch_feed_time")
+
+    if not symbol or ltp is None or vol is None or ts is None:
+        return
+
+    start = candle_start(ts)
+    c = candles.get(symbol)
+
+    if c is None or c["start"] != start:
+        if c:
+            close_candle(symbol, c)
+        candles[symbol] = {
+            "start": start,
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": vol
+        }
+        return
+
+    c["high"] = max(c["high"], ltp)
+    c["low"] = min(c["low"], ltp)
+    c["close"] = ltp
+    c["cum_vol"] = vol
+
+# ------------------------------------------------------------
 # FYERS WS CALLBACKS
-# ============================================================
-
-def on_message(message):
-    # ticks silently consumed
-    pass
-
-def on_error(message):
-    print("WS_ERROR", message)
-
-def on_close(message):
-    print("WS_CLOSED", message)
+# ------------------------------------------------------------
+def on_message(msg):
+    update_candle(msg)
 
 def on_open():
-    global tick_engine_started
-    log_info("WS_CONNECTED")
+    print("WS_CONNECTED")
 
-# ============================================================
-# FYERS WS INIT
-# ============================================================
+def on_error(msg):
+    print("WS_ERROR", msg)
 
+def on_close(msg):
+    print("WS_CLOSED")
+
+# ------------------------------------------------------------
+# START WEBSOCKET
+# ------------------------------------------------------------
 def start_ws():
     ws = data_ws.FyersDataSocket(
-        access_token=os.getenv("FYERS_ACCESS_TOKEN"),
-        log_path="",
-        litemode=True,
-        write_to_file=False,
+        access_token=FYERS_ACCESS_TOKEN,
         reconnect=True
     )
 
@@ -117,90 +147,64 @@ def start_ws():
     ws.on_error = on_error
     ws.on_close = on_close
 
-    symbols = []
-    for lst in SECTOR_MAP.values():
-        symbols.extend(lst)
+    symbols = set()
+    for v in SECTOR_MAP.values():
+        symbols.update(v)
 
-    symbols = list(set(symbols))
-
-    ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
+    ws.subscribe(symbols=list(symbols), data_type="SymbolUpdate")
     ws.keep_running()
 
-# ============================================================
-# TICK ENGINE CONTROL
-# ============================================================
-
-def tick_engine_controller():
-    global tick_engine_started
-
-    now = datetime.now(IST)
-
-    if now.time() < tick_start_time:
-        log_info(f"WAITING_FOR_TICK_START = {tick_start_time.strftime('%H:%M:%S')}")
-        while datetime.now(IST).time() < tick_start_time:
-            time.sleep(1)
-    else:
-        log_info("TICK_START_TIME already passed, starting immediately")
-
-    tick_engine_started = True
-    log_info("TICK_ENGINE_ACTIVATED")
-
-# ============================================================
-# BIAS CONTROLLER
-# ============================================================
-
-def bias_controller():
-    global bias_done
+# ------------------------------------------------------------
+# TICK CONTROLLER (SETTINGS BASED)
+# ------------------------------------------------------------
+def tick_controller(settings):
+    tick_time = time_to_sec(settings.get("TICK_START_TIME", "09:15:00"))
 
     while True:
         now = datetime.now(IST)
+        now_sec = now.hour * 3600 + now.minute * 60 + now.second
 
-        if not bias_done and now.time() >= bias_time:
-            log_info("BIAS_TIME_REACHED")
+        if now_sec >= tick_time:
+            print("TICK_ENGINE_STARTED")
+            start_ws()
+            break
 
-            result = run_sector_bias()
+        print("WAITING_FOR_TICK_START =", settings["TICK_START_TIME"])
+        time.sleep(1)
 
-            # unsubscribe logic handled inside engine
-            log_info(f"BIAS_DONE | Selected stocks: {len(result['selected_stocks'])}")
+# ------------------------------------------------------------
+# BIAS CONTROLLER
+# ------------------------------------------------------------
+def bias_controller(settings):
+    bias_time = time_to_sec(settings.get("BIAS_TIME", "09:25:05"))
 
-            bias_done = True
+    while True:
+        now = datetime.now(IST)
+        now_sec = now.hour * 3600 + now.minute * 60 + now.second
+
+        if now_sec >= bias_time:
+            print("BIAS_TIME_REACHED")
+            run_sector_bias()
             break
 
         time.sleep(1)
 
-# ============================================================
-# MAIN RUNTIME
-# ============================================================
-
-def runtime():
-    global settings, tick_start_time, bias_time
-
-    log_info("SYSTEM_STARTED")
-
+# ------------------------------------------------------------
+# BOOT
+# ------------------------------------------------------------
+if __name__ == "__main__":
     settings = load_settings()
 
-    tick_start_time = parse_time(settings.get("TICK_START_TIME", "09:15:00"))
-    bias_time = parse_time(settings.get("BIAS_TIME", "09:25:05"))
+    threading.Thread(
+        target=tick_controller,
+        args=(settings,),
+        daemon=True
+    ).start()
 
-    log_info("RUNTIME_INIT_DONE")
+    threading.Thread(
+        target=bias_controller,
+        args=(settings,),
+        daemon=True
+    ).start()
 
-    # Threads
-    threading.Thread(target=start_ws, daemon=True).start()
-    threading.Thread(target=tick_engine_controller, daemon=True).start()
-    threading.Thread(target=bias_controller, daemon=True).start()
-
-# ============================================================
-# FLASK ROUTES
-# ============================================================
-
-@app.route("/")
-def health():
-    return {"status": "ok"}
-
-# ============================================================
-# BOOT
-# ============================================================
-
-if __name__ == "__main__":
-    runtime()
     app.run(host="0.0.0.0", port=10000)
