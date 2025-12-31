@@ -1,30 +1,55 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL FULL UNIVERSE VERSION)
+# RajanTradeAutomation – main.py (SETTINGS DRIVEN + LOGGED)
 # ============================================================
 
 import os
 import time
 import threading
+import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
 
-# ------------------------------------------------------------
-# BASIC LOG
-# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
-# ------------------------------------------------------------
-# ENV
-# ------------------------------------------------------------
+# ---------------- ENV ----------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+WEBAPP_URL = os.getenv("WEBAPP_URL")
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-    raise Exception("❌ FYERS ENV variables missing")
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
+    raise Exception("❌ ENV missing")
 
-# ------------------------------------------------------------
-# FLASK
-# ------------------------------------------------------------
+# ---------------- LOGGING ----------------
+SETTINGS = {}
+TICK_ENGINE_ACTIVE = False
+WAIT_LOGGED = False
+
+def post_log(msg, level="INFO"):
+    try:
+        requests.post(
+            WEBAPP_URL,
+            json={
+                "action": "pushLog",
+                "payload": {
+                    "rows": [[
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        level,
+                        msg
+                    ]]
+                }
+            },
+            timeout=3
+        )
+    except Exception:
+        pass
+
+def load_settings():
+    global SETTINGS
+    r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5).json()
+    SETTINGS = r.get("settings", {})
+    post_log("SETTINGS_LOADED")
+
+# ---------------- FLASK ----------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -32,35 +57,24 @@ def health():
     return jsonify({"status": "ok"})
 
 @app.route("/callback")
-def fyers_callback():
-    return jsonify({"status": "callback_received"})
+def callback():
+    return jsonify({"status": "callback"})
 
-# REQUIRED – matches your FYERS redirect URI
 @app.route("/fyers-redirect")
-def fyers_redirect():
-    auth_code = request.args.get("auth_code") or request.args.get("code")
-    return jsonify({"status": "redirect_received", "auth_code": auth_code})
+def redirect_uri():
+    return jsonify({"status": "redirect"})
 
-# ------------------------------------------------------------
-# FYERS WS
-# ------------------------------------------------------------
+# ---------------- LOAD SETTINGS ----------------
+load_settings()
+post_log("SYSTEM_STARTED")
+
+# ---------------- FYERS WS ----------------
 from fyers_apiv3.FyersWebsocket import data_ws
-
-# ------------------------------------------------------------
-# IMPORT FULL UNIVERSE
-# ------------------------------------------------------------
 from sector_mapping import SECTOR_MAP
 
-# build UNIQUE stock universe
-ALL_SYMBOLS = sorted(
-    {symbol for stocks in SECTOR_MAP.values() for symbol in stocks}
-)
+ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
+print("Subscribed symbols:", len(ALL_SYMBOLS))
 
-print(f"📦 Total symbols to subscribe: {len(ALL_SYMBOLS)}")
-
-# ------------------------------------------------------------
-# CANDLE ENGINE (LOCKED)
-# ------------------------------------------------------------
 CANDLE_INTERVAL = 300
 candles = {}
 last_candle_vol = {}
@@ -72,14 +86,24 @@ def close_candle(symbol, c):
     prev = last_candle_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_candle_vol[symbol] = c["cum_vol"]
-
-    print(
-        f"\n🟩 5m CANDLE | {symbol} | "
-        f"O:{c['open']} H:{c['high']} "
-        f"L:{c['low']} C:{c['close']} V:{vol}"
-    )
+    post_log(f"5M_CANDLE_CLOSED | {symbol} | VOL={vol}")
 
 def update_candle(msg):
+    global TICK_ENGINE_ACTIVE, WAIT_LOGGED
+
+    now = datetime.now().strftime("%H:%M:%S")
+    tick_start = SETTINGS.get("TICK_START_TIME")
+
+    if tick_start and now < tick_start:
+        if not WAIT_LOGGED:
+            post_log(f"WAITING_FOR_TICK_START = {tick_start}")
+            WAIT_LOGGED = True
+        return
+
+    if not TICK_ENGINE_ACTIVE:
+        post_log("TICK_ENGINE_ACTIVATED")
+        TICK_ENGINE_ACTIVE = True
+
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
     vol = msg.get("vol_traded_today")
@@ -109,108 +133,62 @@ def update_candle(msg):
     c["close"] = ltp
     c["cum_vol"] = vol
 
-# ------------------------------------------------------------
-# SELECTION + UNSUBSCRIBE STATE
-# ------------------------------------------------------------
+# ---------------- SECTOR ENGINE ----------------
+from sector_engine import run_sector_bias
+
 SELECTION_DONE = False
 UNSUBSCRIBE_DONE = False
 SELECTED_STOCKS = set()
-UNSUB_LOCK = threading.Lock()
+LOCK = threading.Lock()
 
-def on_sector_selection_complete(result):
-    global SELECTION_DONE, SELECTED_STOCKS
-    SELECTED_STOCKS = set(result.get("selected_stocks", []))
-    SELECTION_DONE = True
-    print(f"✅ Sector selection done | Selected = {len(SELECTED_STOCKS)}")
+def sector_engine_runner():
+    bias_time = SETTINGS.get("BIAS_TIME", "09:25:05")
+    while True:
+        now = datetime.now().strftime("%H:%M:%S")
+        if now >= bias_time and not SELECTION_DONE:
+            post_log(f"SECTOR_ENGINE_TRIGGERED @ {bias_time}")
+            result = run_sector_bias()
+            SELECTED_STOCKS.update(result.get("selected_stocks", []))
+            post_log(f"SELECTED_STOCKS = {len(SELECTED_STOCKS)}")
+            unsubscribe_non_selected()
+            break
+        time.sleep(1)
 
-def atomic_unsubscribe_and_delete():
+def unsubscribe_non_selected():
     global UNSUBSCRIBE_DONE
-
-    if not SELECTION_DONE or UNSUBSCRIBE_DONE:
-        return
-
-    with UNSUB_LOCK:
-        if not SELECTION_DONE or UNSUBSCRIBE_DONE:
+    with LOCK:
+        if UNSUBSCRIBE_DONE:
             return
-
         non_selected = set(candles.keys()) - SELECTED_STOCKS
-
-        if not non_selected:
-            UNSUBSCRIBE_DONE = True
-            return
-
-        try:
-            fyers_ws.unsubscribe(
-                symbols=list(non_selected),
-                data_type="SymbolUpdate"
-            )
-        except Exception:
-            pass
-
+        fyers_ws.unsubscribe(list(non_selected), "SymbolUpdate")
         for s in non_selected:
             candles.pop(s, None)
             last_candle_vol.pop(s, None)
-
         UNSUBSCRIBE_DONE = True
-        print(f"✂️ Unsubscribed & deleted {len(non_selected)} stocks")
+        post_log(f"UNSUBSCRIBED {len(non_selected)} STOCKS")
 
-# ------------------------------------------------------------
-# WS CALLBACKS
-# ------------------------------------------------------------
+# ---------------- WS CALLBACKS ----------------
 def on_message(msg):
     update_candle(msg)
-    atomic_unsubscribe_and_delete()
-
-def on_error(msg):
-    print("❌ WS ERROR")
-
-def on_close(msg):
-    print("🔌 WS CLOSED")
 
 def on_connect():
     global fyers_ws
-    print("🔗 WS CONNECTED")
-    fyers_ws.subscribe(
-        symbols=ALL_SYMBOLS,
-        data_type="SymbolUpdate"
-    )
+    post_log("WS_CONNECTED")
+    fyers_ws.subscribe(ALL_SYMBOLS, "SymbolUpdate")
 
-# ------------------------------------------------------------
-# WS THREAD
-# ------------------------------------------------------------
 def start_ws():
     global fyers_ws
     fyers_ws = data_ws.FyersDataSocket(
         access_token=FYERS_ACCESS_TOKEN,
         on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
         on_connect=on_connect,
         reconnect=True
     )
     fyers_ws.connect()
 
 threading.Thread(target=start_ws, daemon=True).start()
-
-# ------------------------------------------------------------
-# SECTOR ENGINE @ 09:25
-# ------------------------------------------------------------
-from sector_engine import run_sector_bias
-
-def sector_engine_runner():
-    while True:
-        now = datetime.now().strftime("%H:%M:%S")
-        if now >= "09:25:05" and not SELECTION_DONE:
-            result = run_sector_bias()
-            on_sector_selection_complete(result)
-            break
-        time.sleep(1)
-
 threading.Thread(target=sector_engine_runner, daemon=True).start()
 
-# ------------------------------------------------------------
-# START FLASK
-# ------------------------------------------------------------
+# ---------------- FLASK RUN ----------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
