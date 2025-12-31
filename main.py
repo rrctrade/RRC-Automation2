@@ -1,226 +1,162 @@
-# ============================================================
-# RajanTradeAutomation – main.py (FINAL STABLE)
-# Settings-driven timing + Logs sheet + Render-safe startup
-# ============================================================
+/******************************************************
+ RajanTradeAutomation – WebApp.gs (v3.3 FINAL FIXED)
+ ✔ Settings time → always HH:MM:SS
+ ✔ Logs sheet support
+ ✔ Safe for Python (Render)
+******************************************************/
 
-import os
-import time
-import threading
-import requests
-from datetime import datetime
-from flask import Flask, jsonify, request
+/* ================= BASIC ================= */
 
-print("🚀 main.py STARTED")
+function doGet() {
+  return ContentService.createTextOutput("OK");
+}
 
-# ---------------- ENV ----------------
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL")
+function doPost(e) {
+  try {
+    const body = JSON.parse(e.postData?.contents || "{}");
+    const action = body.action;
+    const payload = body.payload || {};
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
-    raise Exception("❌ Required ENV missing")
+    switch (action) {
 
-# ---------------- GLOBAL STATE ----------------
-SETTINGS = {}
-TICK_ENGINE_ACTIVE = False
-WAIT_LOGGED = False
+      case "ping":
+        return out_({ ok: true });
 
-# ---------------- LOGGING ----------------
-def post_log(msg, level="INFO"):
-    try:
-        requests.post(
-            WEBAPP_URL,
-            json={
-                "action": "pushLog",
-                "payload": {
-                    "rows": [[
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        level,
-                        msg
-                    ]]
-                }
-            },
-            timeout=3
-        )
-    except Exception:
-        pass
+      case "getSettings":
+        return out_({ ok: true, settings: readSettings_() });
 
+      case "pushCandle":
+        push_("CandleHistory", payload.candles);
+        return out_({ ok: true });
 
-def load_settings():
-    global SETTINGS
-    for _ in range(3):
-        try:
-            r = requests.post(
-                WEBAPP_URL,
-                json={"action": "getSettings"},
-                timeout=5
-            ).json()
-            SETTINGS = r.get("settings", {})
-            post_log("SETTINGS_LOADED")
-            return
-        except Exception:
-            time.sleep(2)
-    post_log("SETTINGS_LOAD_FAILED", "ERROR")
+      case "pushCandleEngine":
+        push_("LiveCandlesEngine", payload.candles);
+        return out_({ ok: true });
 
+      case "pushSignal":
+        push_("Signals", payload.signals);
+        return out_({ ok: true });
 
-# ---------------- FLASK ----------------
-app = Flask(__name__)
+      case "pushState":
+        pushState_(payload.items);
+        return out_({ ok: true });
 
-@app.route("/")
-def health():
-    return jsonify({"status": "ok"})
+      /* 🔥 LOGS FROM main.py */
+      case "pushLog":
+        push_("Logs", payload.rows);
+        return out_({ ok: true });
 
-@app.route("/callback")
-def callback():
-    return jsonify({"status": "callback"})
+      default:
+        return out_({ ok: false, error: "Unknown action" });
+    }
 
-@app.route("/fyers-redirect")
-def redirect_uri():
-    return jsonify({"status": "redirect"})
+  } catch (err) {
+    logError_("doPost", err);
+    return out_({ ok: false, error: String(err) });
+  }
+}
 
+/* ====================================================
+   SETTINGS (🔥 TIME FIXED HERE 🔥)
+   ==================================================== */
+function readSettings_() {
+  const sh = getSheet_("Settings");
+  if (!sh) return {};
 
-# ---------------- FYERS WS ----------------
-from fyers_apiv3.FyersWebsocket import data_ws
-from sector_mapping import SECTOR_MAP
-from sector_engine import run_sector_bias
+  const map = {};
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return map;
 
-ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
-print("📦 Subscribed symbols:", len(ALL_SYMBOLS))
+  const tz = "Asia/Kolkata";
 
-CANDLE_INTERVAL = 300
-candles = {}
-last_candle_vol = {}
+  sh.getRange(2, 1, lastRow - 1, 2)
+    .getValues()
+    .forEach(row => {
+      const key = row[0];
+      let val = row[1];
 
-SELECTION_DONE = False
-UNSUBSCRIBE_DONE = False
-SELECTED_STOCKS = set()
-LOCK = threading.Lock()
+      if (!key) return;
 
+      // ⏰ If value is Date (time cell) → convert to HH:MM:SS
+      if (val instanceof Date) {
+        val = Utilities.formatDate(val, tz, "HH:mm:ss");
+      }
 
-def candle_start(ts):
-    return ts - (ts % CANDLE_INTERVAL)
+      map[key] = String(val);
+    });
 
+  return map;
+}
 
-def close_candle(symbol, c):
-    prev = last_candle_vol.get(symbol, c["cum_vol"])
-    vol = c["cum_vol"] - prev
-    last_candle_vol[symbol] = c["cum_vol"]
-    post_log(f"5M_CANDLE_CLOSED | {symbol} | VOL={vol}")
+/* ====================================================
+   GENERIC PUSH (APPEND SAFE)
+   ==================================================== */
+function push_(sheetName, rows) {
+  if (!rows || !rows.length) return;
 
+  const sh = getSheet_(sheetName);
+  sh.getRange(
+    sh.getLastRow() + 1,
+    1,
+    rows.length,
+    rows[0].length
+  ).setValues(rows);
+}
 
-def update_candle(msg):
-    global TICK_ENGINE_ACTIVE, WAIT_LOGGED
+/* ====================================================
+   STATE (KEY–VALUE UPSERT)
+   ==================================================== */
+function pushState_(items) {
+  if (!items || !items.length) return;
 
-    now = datetime.now().strftime("%H:%M:%S")
-    tick_start = SETTINGS.get("TICK_START_TIME")
+  const sh = getSheet_("State");
+  const lastRow = sh.getLastRow();
+  const existing = {};
 
-    # ⛔ Tick gate (settings-driven)
-    if tick_start and now < tick_start:
-        if not WAIT_LOGGED:
-            post_log(f"WAITING_FOR_TICK_START = {tick_start}")
-            WAIT_LOGGED = True
-        return
+  if (lastRow > 1) {
+    sh.getRange(2, 1, lastRow - 1, 2)
+      .getValues()
+      .forEach((r, i) => {
+        if (r[0]) existing[r[0]] = i + 2;
+      });
+  }
 
-    if not TICK_ENGINE_ACTIVE:
-        post_log("TICK_ENGINE_ACTIVATED")
-        TICK_ENGINE_ACTIVE = True
+  items.forEach(it => {
+    if (!it.key) return;
 
-    symbol = msg.get("symbol")
-    ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
-    ts = msg.get("exch_feed_time")
+    if (existing[it.key]) {
+      sh.getRange(existing[it.key], 2).setValue(it.value);
+    } else {
+      sh.appendRow([it.key, it.value]);
+    }
+  });
+}
 
-    if not symbol or ltp is None or vol is None or ts is None:
-        return
+/* ====================================================
+   HELPERS
+   ==================================================== */
+function getSheet_(name) {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(name);
 
-    start = candle_start(ts)
-    c = candles.get(symbol)
+  if (!sh) {
+    sh = ss.insertSheet(name);
+  }
+  return sh;
+}
 
-    if c is None or c["start"] != start:
-        if c:
-            close_candle(symbol, c)
-        candles[symbol] = {
-            "start": start,
-            "open": ltp,
-            "high": ltp,
-            "low": ltp,
-            "close": ltp,
-            "cum_vol": vol
-        }
-        return
+function out_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
 
-    c["high"] = max(c["high"], ltp)
-    c["low"] = min(c["low"], ltp)
-    c["close"] = ltp
-    c["cum_vol"] = vol
-
-
-def unsubscribe_non_selected():
-    global UNSUBSCRIBE_DONE
-    with LOCK:
-        if UNSUBSCRIBE_DONE:
-            return
-        non_selected = set(candles.keys()) - SELECTED_STOCKS
-        if non_selected:
-            fyers_ws.unsubscribe(list(non_selected), "SymbolUpdate")
-            for s in non_selected:
-                candles.pop(s, None)
-                last_candle_vol.pop(s, None)
-        UNSUBSCRIBE_DONE = True
-        post_log(f"UNSUBSCRIBED {len(non_selected)} STOCKS")
-
-
-def sector_engine_runner():
-    global SELECTION_DONE
-    while True:
-        bias_time = SETTINGS.get("BIAS_TIME", "09:25:05")
-        now = datetime.now().strftime("%H:%M:%S")
-
-        if now >= bias_time and not SELECTION_DONE:
-            post_log(f"SECTOR_ENGINE_TRIGGERED @ {bias_time}")
-            result = run_sector_bias()
-            SELECTED_STOCKS.update(result.get("selected_stocks", []))
-            post_log(f"SELECTED_STOCKS = {len(SELECTED_STOCKS)}")
-            unsubscribe_non_selected()
-            SELECTION_DONE = True
-            break
-
-        time.sleep(1)
-
-
-def on_message(msg):
-    update_candle(msg)
-
-
-def on_connect():
-    post_log("WS_CONNECTED")
-    fyers_ws.subscribe(ALL_SYMBOLS, "SymbolUpdate")
-
-
-def start_ws():
-    global fyers_ws
-    fyers_ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_message,
-        on_connect=on_connect,
-        reconnect=True
-    )
-    fyers_ws.connect()
-
-
-# ---------------- SAFE BACKGROUND INIT ----------------
-def init_runtime():
-    time.sleep(5)  # Render + network warm-up
-    post_log("SYSTEM_STARTED")
-    load_settings()
-    post_log("RUNTIME_INIT_DONE")
-
-
-threading.Thread(target=start_ws, daemon=True).start()
-threading.Thread(target=sector_engine_runner, daemon=True).start()
-threading.Thread(target=init_runtime, daemon=True).start()
-
-
-# ---------------- FLASK RUN ----------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+/* ====================================================
+   LOGGING (SAFE)
+   ==================================================== */
+function logError_(fn, err) {
+  try {
+    const sh = getSheet_("Logs");
+    sh.appendRow([new Date(), "ERROR", fn + " : " + err]);
+  } catch (e) {}
+}
