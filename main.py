@@ -1,10 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FINAL PRODUCTION VERSION
-# - Perfect 5m candle alignment
-# - Settings-driven BIAS_TIME
-# - Redeploy safe
-# - FULL Logs Sheet Visibility
+# FINAL PRODUCTION VERSION (CANDLE-GUARDED BIAS + FULL LOGS)
 # ============================================================
 
 import os
@@ -13,8 +9,6 @@ import threading
 import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
-
-print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
 # ENV
@@ -81,7 +75,7 @@ ALL_SYMBOLS = sorted({s for lst in SECTOR_MAP.values() for s in lst})
 push_log("SYSTEM", f"Universe loaded | Symbols={len(ALL_SYMBOLS)}")
 
 # ------------------------------------------------------------
-# SETTINGS (READ FROM SHEET)
+# SETTINGS
 # ------------------------------------------------------------
 def fetch_settings():
     try:
@@ -91,7 +85,7 @@ def fetch_settings():
         return {}
 
 SETTINGS = fetch_settings()
-BIAS_TIME = SETTINGS.get("BIAS_TIME")
+BIAS_TIME = SETTINGS.get("BIAS_TIME")  # HH:MM:SS
 
 push_log("SETTINGS", f"BIAS_TIME={BIAS_TIME}")
 
@@ -99,6 +93,7 @@ push_log("SETTINGS", f"BIAS_TIME={BIAS_TIME}")
 # CANDLE ENGINE (PERFECT 5-MIN ONLY)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
+
 candles = {}
 last_cum_vol = {}
 
@@ -120,7 +115,7 @@ def update_candle(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
-    # wait for first perfect boundary
+    # Wait for first valid boundary
     if not ACTIVE_CANDLES:
         if is_5min_boundary(ts):
             ACTIVE_CANDLES = True
@@ -130,7 +125,7 @@ def update_candle(msg):
                 f"First valid candle boundary @ {datetime.fromtimestamp(ts)}"
             )
         else:
-            return
+            return  # skip incomplete candle
 
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
@@ -140,10 +135,7 @@ def update_candle(msg):
             prev = last_cum_vol.get(symbol, c["cum_vol"])
             vol5 = c["cum_vol"] - prev
             last_cum_vol[symbol] = c["cum_vol"]
-            push_log(
-                "CANDLE",
-                f"Closed | {symbol} | V={vol5}"
-            )
+            push_log("CANDLE", f"Closed | {symbol} | V={vol5}")
 
         candles[symbol] = {
             "start": start,
@@ -161,7 +153,7 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# SECTOR BIAS + UNSUBSCRIBE
+# SECTOR BIAS + UNSUBSCRIBE (CANDLE-GUARDED)
 # ------------------------------------------------------------
 from sector_engine import run_sector_bias
 
@@ -173,7 +165,14 @@ LOCK = threading.Lock()
 def try_run_bias():
     global SELECTION_DONE, SELECTED_STOCKS
 
-    if SELECTION_DONE or not BIAS_TIME:
+    if SELECTION_DONE:
+        return
+
+    # 🔒 CRITICAL GUARD
+    if not ACTIVE_CANDLES or FIRST_CANDLE_TS is None:
+        return
+
+    if not BIAS_TIME:
         return
 
     now = datetime.now().strftime("%H:%M:%S")
@@ -189,6 +188,7 @@ def try_run_bias():
 
 def unsubscribe_others():
     global UNSUB_DONE
+
     if not SELECTION_DONE or UNSUB_DONE:
         return
 
@@ -212,11 +212,7 @@ def unsubscribe_others():
                 f"Unsubscribed {len(non_selected)} non-selected stocks"
             )
 
-        push_log(
-            "LIVE",
-            f"Active stocks={len(SELECTED_STOCKS)}"
-        )
-
+        push_log("LIVE", f"Active stocks={len(SELECTED_STOCKS)}")
         UNSUB_DONE = True
 
 # ------------------------------------------------------------
