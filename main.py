@@ -1,50 +1,29 @@
 # ============================================================
-# RajanTradeAutomation – main.py
-# OLD STABLE LOGIC + LOGS SHEET (NO LOGIC CHANGE)
+# RajanTradeAutomation – main.py (FINAL FULL UNIVERSE VERSION)
 # ============================================================
 
 import os
 import time
 import threading
-import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
+
+# ------------------------------------------------------------
+# BASIC LOG
+# ------------------------------------------------------------
+print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
 # ENV
 # ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL")
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
-    raise Exception("❌ ENV variables missing")
-
-# ------------------------------------------------------------
-# LOG HELPER (ADD ONLY)
-# ------------------------------------------------------------
-def push_log(level, message):
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {level} | {message}")
-    try:
-        requests.post(
-            WEBAPP_URL,
-            json={
-                "action": "pushLog",
-                "payload": {
-                    "level": level,
-                    "message": message
-                }
-            },
-            timeout=2
-        )
-    except Exception:
-        pass
-
-push_log("SYSTEM", "main.py booted")
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
+    raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# FLASK (UNCHANGED)
+# FLASK
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -56,6 +35,7 @@ def health():
 def fyers_callback():
     return jsonify({"status": "callback_received"})
 
+# REQUIRED – matches your FYERS redirect URI
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code") or request.args.get("code")
@@ -67,40 +47,37 @@ def fyers_redirect():
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ------------------------------------------------------------
-# UNIVERSE (UNCHANGED)
+# IMPORT FULL UNIVERSE
 # ------------------------------------------------------------
 from sector_mapping import SECTOR_MAP
 
-ALL_SYMBOLS = sorted({s for lst in SECTOR_MAP.values() for s in lst})
-push_log("SYSTEM", f"Universe loaded | Symbols={len(ALL_SYMBOLS)}")
+# build UNIQUE stock universe
+ALL_SYMBOLS = sorted(
+    {symbol for stocks in SECTOR_MAP.values() for symbol in stocks}
+)
+
+print(f"📦 Total symbols to subscribe: {len(ALL_SYMBOLS)}")
 
 # ------------------------------------------------------------
-# CANDLE ENGINE (OLD STABLE – UNCHANGED)
+# CANDLE ENGINE (LOCKED)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
 candles = {}
 last_candle_vol = {}
 
-TOTAL_5MIN_CANDLES = 0
-CANDLE_LOCK = threading.Lock()
-
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_candle(symbol, c):
-    global TOTAL_5MIN_CANDLES
-
     prev = last_candle_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_candle_vol[symbol] = c["cum_vol"]
 
-    # 🔒 ONLY LOGGING ADDED (NO LOGIC CHANGE)
-    with CANDLE_LOCK:
-        TOTAL_5MIN_CANDLES += 1
-        push_log(
-            "CANDLE",
-            f"5-min candle closed | total={TOTAL_5MIN_CANDLES}"
-        )
+    print(
+        f"\n🟩 5m CANDLE | {symbol} | "
+        f"O:{c['open']} H:{c['high']} "
+        f"L:{c['low']} C:{c['close']} V:{vol}"
+    )
 
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -133,20 +110,18 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# SELECTION + UNSUBSCRIBE (UNCHANGED)
+# SELECTION + UNSUBSCRIBE STATE
 # ------------------------------------------------------------
 SELECTION_DONE = False
 UNSUBSCRIBE_DONE = False
 SELECTED_STOCKS = set()
 UNSUB_LOCK = threading.Lock()
 
-from sector_engine import run_sector_bias
-
 def on_sector_selection_complete(result):
     global SELECTION_DONE, SELECTED_STOCKS
     SELECTED_STOCKS = set(result.get("selected_stocks", []))
     SELECTION_DONE = True
-    push_log("BIAS", f"Sector selection done | Selected={len(SELECTED_STOCKS)}")
+    print(f"✅ Sector selection done | Selected = {len(SELECTED_STOCKS)}")
 
 def atomic_unsubscribe_and_delete():
     global UNSUBSCRIBE_DONE
@@ -177,32 +152,31 @@ def atomic_unsubscribe_and_delete():
             last_candle_vol.pop(s, None)
 
         UNSUBSCRIBE_DONE = True
-        push_log("UNSUB", f"Unsubscribed {len(non_selected)} stocks")
+        print(f"✂️ Unsubscribed & deleted {len(non_selected)} stocks")
 
 # ------------------------------------------------------------
-# WS CALLBACKS (UNCHANGED)
+# WS CALLBACKS
 # ------------------------------------------------------------
 def on_message(msg):
     update_candle(msg)
     atomic_unsubscribe_and_delete()
 
 def on_error(msg):
-    push_log("ERROR", "WS ERROR")
+    print("❌ WS ERROR")
 
 def on_close(msg):
-    push_log("WS", "WebSocket closed")
+    print("🔌 WS CLOSED")
 
 def on_connect():
     global fyers_ws
-    push_log("WS", "WebSocket connected")
+    print("🔗 WS CONNECTED")
     fyers_ws.subscribe(
         symbols=ALL_SYMBOLS,
         data_type="SymbolUpdate"
     )
-    push_log("WS", f"Subscribed {len(ALL_SYMBOLS)} symbols")
 
 # ------------------------------------------------------------
-# WS THREAD (UNCHANGED)
+# WS THREAD
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -219,13 +193,14 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# SECTOR ENGINE RUNNER (UNCHANGED – HARDCODED TIME)
+# SECTOR ENGINE @ 09:25
 # ------------------------------------------------------------
+from sector_engine import run_sector_bias
+
 def sector_engine_runner():
     while True:
         now = datetime.now().strftime("%H:%M:%S")
         if now >= "09:25:05" and not SELECTION_DONE:
-            push_log("BIAS", "Sector bias check started")
             result = run_sector_bias()
             on_sector_selection_complete(result)
             break
