@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# STABLE CANDLE ENGINE + LOGS SHEET (SAFE VERSION)
+# OLD STABLE LOGIC + LOGS SHEET (NO LOGIC CHANGE)
 # ============================================================
 
 import os
@@ -9,11 +9,6 @@ import threading
 import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
-
-# ------------------------------------------------------------
-# BASIC LOG
-# ------------------------------------------------------------
-print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
 # ENV
@@ -26,7 +21,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
     raise Exception("❌ ENV variables missing")
 
 # ------------------------------------------------------------
-# LOG HELPERS (Render + Google Sheets)
+# LOG HELPER (ADD ONLY)
 # ------------------------------------------------------------
 def push_log(level, message):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -49,7 +44,7 @@ def push_log(level, message):
 push_log("SYSTEM", "main.py booted")
 
 # ------------------------------------------------------------
-# FLASK
+# FLASK (UNCHANGED)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -72,18 +67,15 @@ def fyers_redirect():
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ------------------------------------------------------------
-# IMPORT FULL UNIVERSE
+# UNIVERSE (UNCHANGED)
 # ------------------------------------------------------------
 from sector_mapping import SECTOR_MAP
 
-ALL_SYMBOLS = sorted(
-    {symbol for stocks in SECTOR_MAP.values() for symbol in stocks}
-)
-
+ALL_SYMBOLS = sorted({s for lst in SECTOR_MAP.values() for s in lst})
 push_log("SYSTEM", f"Universe loaded | Symbols={len(ALL_SYMBOLS)}")
 
 # ------------------------------------------------------------
-# CANDLE ENGINE (ORIGINAL – UNTOUCHED)
+# CANDLE ENGINE (OLD STABLE – UNCHANGED)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
 candles = {}
@@ -102,12 +94,12 @@ def close_candle(symbol, c):
     vol = c["cum_vol"] - prev
     last_candle_vol[symbol] = c["cum_vol"]
 
-    # 🔒 ONLY SUMMARY LOG (NO PER-SYMBOL NOISE)
+    # 🔒 ONLY LOGGING ADDED (NO LOGIC CHANGE)
     with CANDLE_LOCK:
         TOTAL_5MIN_CANDLES += 1
         push_log(
             "CANDLE",
-            f"5-min candle closed | total_closed={TOTAL_5MIN_CANDLES}"
+            f"5-min candle closed | total={TOTAL_5MIN_CANDLES}"
         )
 
 def update_candle(msg):
@@ -141,21 +133,20 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# SELECTION + UNSUBSCRIBE STATE (UNCHANGED)
+# SELECTION + UNSUBSCRIBE (UNCHANGED)
 # ------------------------------------------------------------
 SELECTION_DONE = False
 UNSUBSCRIBE_DONE = False
 SELECTED_STOCKS = set()
 UNSUB_LOCK = threading.Lock()
 
+from sector_engine import run_sector_bias
+
 def on_sector_selection_complete(result):
     global SELECTION_DONE, SELECTED_STOCKS
     SELECTED_STOCKS = set(result.get("selected_stocks", []))
     SELECTION_DONE = True
-    push_log(
-        "BIAS",
-        f"Sector selection done | Selected={len(SELECTED_STOCKS)}"
-    )
+    push_log("BIAS", f"Sector selection done | Selected={len(SELECTED_STOCKS)}")
 
 def atomic_unsubscribe_and_delete():
     global UNSUBSCRIBE_DONE
@@ -186,13 +177,10 @@ def atomic_unsubscribe_and_delete():
             last_candle_vol.pop(s, None)
 
         UNSUBSCRIBE_DONE = True
-        push_log(
-            "UNSUB",
-            f"Unsubscribed & deleted {len(non_selected)} stocks"
-        )
+        push_log("UNSUB", f"Unsubscribed {len(non_selected)} stocks")
 
 # ------------------------------------------------------------
-# WS CALLBACKS
+# WS CALLBACKS (UNCHANGED)
 # ------------------------------------------------------------
 def on_message(msg):
     update_candle(msg)
@@ -214,7 +202,7 @@ def on_connect():
     push_log("WS", f"Subscribed {len(ALL_SYMBOLS)} symbols")
 
 # ------------------------------------------------------------
-# WS THREAD
+# WS THREAD (UNCHANGED)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -231,10 +219,8 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# SECTOR ENGINE @ 09:25 (UNCHANGED)
+# SECTOR ENGINE RUNNER (UNCHANGED – HARDCODED TIME)
 # ------------------------------------------------------------
-from sector_engine import run_sector_bias
-
 def sector_engine_runner():
     while True:
         now = datetime.now().strftime("%H:%M:%S")
