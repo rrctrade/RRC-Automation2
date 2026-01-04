@@ -44,10 +44,7 @@ def log(level, msg):
             WEBAPP_URL,
             json={
                 "action": "pushLog",
-                "payload": {
-                    "level": level,
-                    "message": msg
-                }
+                "payload": {"level": level, "message": msg}
             },
             timeout=3
         )
@@ -57,15 +54,11 @@ def log(level, msg):
 log("SYSTEM", "main.py booted")
 
 # ============================================================
-# SETTINGS (from WebApp.gs)
+# SETTINGS (ALL KEYS)
 # ============================================================
 def get_settings():
     try:
-        r = requests.post(
-            WEBAPP_URL,
-            json={"action": "getSettings"},
-            timeout=5
-        )
+        r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5)
         return r.json().get("settings", {})
     except Exception as e:
         log("ERROR", f"Settings read failed: {e}")
@@ -74,6 +67,7 @@ def get_settings():
 SETTINGS = get_settings()
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 
+log("SETTINGS", f"Loaded settings keys={list(SETTINGS.keys())}")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 
 # ============================================================
@@ -82,14 +76,11 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 CANDLE_INTERVAL = 300
 
 SELECTED_STOCKS = set()
-CANDLES = {}          # symbol -> {start_ts: candle}
-LAST_CUM_VOL = {}
+CANDLES = {}
 
 BIAS_DONE = False
 SUBSCRIBED = False
 C3_REPLACED = False
-
-LOCK = threading.Lock()
 
 # ============================================================
 # TIME HELPERS
@@ -122,7 +113,7 @@ def fetch_history(symbol, start_ts, end_ts):
     return []
 
 # ============================================================
-# LIVE CANDLE ENGINE (SELECTED ONLY)
+# LIVE CANDLE ENGINE
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -165,10 +156,19 @@ def run_bias():
     result = run_sector_bias()
 
     sectors = result.get("strong_sectors", [])
-    stocks = result.get("selected_stocks", [])
+    raw_stocks = result.get("selected_stocks", [])
 
-    log("BIAS", f"Sectors={len(sectors)} | Stocks={len(stocks)}")
-    return stocks
+    for s in sectors:
+        log("SECTOR", f"{s['sector']} | {s['bias']} | up={s['up_pct']} down={s['down_pct']}")
+
+    unique_stocks = set(raw_stocks)
+
+    log(
+        "STOCKS",
+        f"Raw={len(raw_stocks)} | Unique={len(unique_stocks)} | DuplicatesRemoved={len(raw_stocks)-len(unique_stocks)}"
+    )
+
+    return unique_stocks
 
 # ============================================================
 # MAIN CONTROLLER
@@ -188,7 +188,7 @@ def controller():
 
         # ---------- BIAS ----------
         if now >= bias_dt and not BIAS_DONE:
-            SELECTED_STOCKS = set(run_bias())
+            SELECTED_STOCKS = run_bias()
             BIAS_DONE = True
 
             if not SELECTED_STOCKS:
@@ -204,11 +204,7 @@ def controller():
                 h = fetch_history(s, c1_start, c2_start + 300)
                 for ts, o, h_, l, c, v in h:
                     CANDLES.setdefault(s, {})[int(ts)] = {
-                        "open": o,
-                        "high": h_,
-                        "low": l,
-                        "close": c,
-                        "cum_vol": v
+                        "open": o, "high": h_, "low": l, "close": c, "cum_vol": v
                     }
 
             log("HISTORY", "C1 & C2 inserted")
@@ -227,11 +223,7 @@ def controller():
                     if h:
                         ts, o, h_, l, c, v = h[-1]
                         CANDLES.setdefault(s, {})[int(ts)] = {
-                            "open": o,
-                            "high": h_,
-                            "low": l,
-                            "close": c,
-                            "cum_vol": v
+                            "open": o, "high": h_, "low": l, "close": c, "cum_vol": v
                         }
                 C3_REPLACED = True
                 log("HISTORY", "C3 replaced from history")
@@ -241,17 +233,10 @@ def controller():
 # ============================================================
 # WS CALLBACKS
 # ============================================================
-def on_message(msg):
-    update_candle(msg)
-
-def on_error(msg):
-    log("ERROR", f"WS error {msg}")
-
-def on_close(msg):
-    log("WS", "WS closed")
-
-def on_connect():
-    log("WS", "WS connected")
+def on_message(msg): update_candle(msg)
+def on_error(msg): log("ERROR", f"WS error {msg}")
+def on_close(msg): log("WS", "WS closed")
+def on_connect(): log("WS", "WS connected")
 
 # ============================================================
 # START WS
@@ -273,21 +258,13 @@ threading.Thread(target=controller, daemon=True).start()
 # ============================================================
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "bias_done": BIAS_DONE,
-        "subscribed": SUBSCRIBED
-    })
+    return jsonify({"status": "ok", "bias_done": BIAS_DONE, "subscribed": SUBSCRIBED})
 
-# ✅ FYERS REDIRECT URI (MANDATORY)
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code") or request.args.get("code")
     log("SYSTEM", f"FYERS redirect received | auth_code={auth_code}")
-    return jsonify({
-        "status": "redirect_received",
-        "auth_code": auth_code
-    })
+    return jsonify({"status": "redirect_received", "auth_code": auth_code})
 
 # ============================================================
 # START FLASK
