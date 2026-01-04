@@ -1,7 +1,7 @@
 # ============================================================
 # sector_engine.py
 # Sector Bias + Stock Selection
-# STEP-A : Clean Interface Version (Render Ready)
+# STEP-A : FINAL FIXED VERSION (BUY + SELL)
 # ============================================================
 
 import requests
@@ -97,9 +97,12 @@ def run_sector_bias():
         down_pct = (down / total) * 100 if total else 0
 
         bias = None
+
+        # ✅ FIX: allow both BUY and SELL sectors
         if up_pct >= 80:
             bias = "BUY"
-        elif down_pct >= 80:
+
+        if down_pct >= 80:
             bias = "SELL"
 
         if not bias:
@@ -112,11 +115,13 @@ def run_sector_bias():
             "down_pct": round(down_pct, 2),
         })
 
+        # FnO stocks allowed for this sector
         allowed_fno = {
             s.replace("NSE:", "").replace("-EQ", "")
             for s in SECTOR_MAP.get(map_key, [])
         }
 
+        # Stock-level filter (+/- 2.5%)
         for sym, pct in stocks.items():
             if sym in allowed_fno and abs(pct) <= 2.5:
                 selected_stocks.add(f"NSE:{sym}-EQ")
@@ -134,7 +139,7 @@ def run_sector_bias():
 # LOCAL / MANUAL TEST
 # ------------------------------------------------------------
 if __name__ == "__main__":
-    print("\n🚀 SECTOR ENGINE STEP-A TEST\n")
+    print("\n🚀 SECTOR ENGINE FINAL TEST (BUY + SELL)\n")
     result = run_sector_bias()
 
     print("Time:", result["timestamp"])
