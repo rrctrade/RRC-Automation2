@@ -1,16 +1,24 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL LOCKED VERSION)
-# HISTORY + TARGETED WS + EARLY SUBSCRIBE + FYERS REDIRECT
+# RajanTradeAutomation – main.py (FINAL FIXED VERSION)
+# HISTORY + TARGETED WS + EARLY SUBSCRIBE
+# + UTC–IST SAFE BIAS TIME
 # ============================================================
 
 import os
 import time
-import threading 
+import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 from flask import Flask, jsonify, request
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
+
+# ============================================================
+# TIMEZONES
+# ============================================================
+IST = pytz.timezone("Asia/Kolkata")
+UTC = pytz.utc
 
 # ============================================================
 # ENV
@@ -34,10 +42,10 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (Render + Google Sheets)
+# LOGGING
 # ============================================================
 def log(level, msg):
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = datetime.now(IST).strftime("%H:%M:%S")
     print(f"[{ts}] {level} | {msg}")
     try:
         requests.post(
@@ -54,7 +62,7 @@ def log(level, msg):
 log("SYSTEM", "main.py booted")
 
 # ============================================================
-# SETTINGS (ALL KEYS)
+# SETTINGS
 # ============================================================
 def get_settings():
     try:
@@ -83,14 +91,18 @@ SUBSCRIBED = False
 C3_REPLACED = False
 
 # ============================================================
-# TIME HELPERS
+# TIME HELPERS (UTC SAFE)
 # ============================================================
-def today_time(tstr):
+def ist_bias_datetime_utc(tstr: str) -> datetime:
+    """
+    Converts IST bias time from Sheets into UTC datetime
+    """
     t = datetime.strptime(tstr, "%H:%M:%S").time()
-    now = datetime.now()
-    return datetime.combine(now.date(), t)
+    ist_now = datetime.now(IST)
+    ist_dt = IST.localize(datetime.combine(ist_now.date(), t))
+    return ist_dt.astimezone(UTC)
 
-def candle_start(ts):
+def candle_start(ts: int) -> int:
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
@@ -180,14 +192,18 @@ def controller():
         log("ERROR", "BIAS_TIME missing")
         return
 
-    bias_dt = today_time(BIAS_TIME_STR)
-    log("SYSTEM", f"Waiting for Bias Time {bias_dt.time()}")
+    bias_dt_utc = ist_bias_datetime_utc(BIAS_TIME_STR)
+
+    log(
+        "SYSTEM",
+        f"Waiting for Bias Time IST={BIAS_TIME_STR} | UTC={bias_dt_utc.strftime('%H:%M:%S')}"
+    )
 
     while True:
-        now = datetime.now()
+        now_utc = datetime.now(UTC)
 
         # ---------- BIAS ----------
-        if now >= bias_dt and not BIAS_DONE:
+        if now_utc >= bias_dt_utc and not BIAS_DONE:
             SELECTED_STOCKS = run_bias()
             BIAS_DONE = True
 
@@ -196,7 +212,7 @@ def controller():
                 return
 
             # -------- HISTORY C1 & C2 --------
-            ref = candle_start(int(bias_dt.timestamp()))
+            ref = candle_start(int(bias_dt_utc.timestamp()))
             c2_start = ref - 300
             c1_start = ref - 600
 
@@ -216,8 +232,8 @@ def controller():
 
         # ---------- REPLACE C3 ----------
         if BIAS_DONE and SUBSCRIBED and not C3_REPLACED:
-            ref = candle_start(int(bias_dt.timestamp()))
-            if datetime.now().timestamp() >= ref + 330:
+            ref = candle_start(int(bias_dt_utc.timestamp()))
+            if time.time() >= ref + 330:
                 for s in SELECTED_STOCKS:
                     h = fetch_history(s, ref, ref + 300)
                     if h:
@@ -258,7 +274,11 @@ threading.Thread(target=controller, daemon=True).start()
 # ============================================================
 @app.route("/")
 def health():
-    return jsonify({"status": "ok", "bias_done": BIAS_DONE, "subscribed": SUBSCRIBED})
+    return jsonify({
+        "status": "ok",
+        "bias_done": BIAS_DONE,
+        "subscribed": SUBSCRIBED
+    })
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
