@@ -1,7 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL VERIFIED VERSION)
-# HISTORY + TARGETED WS + EARLY SUBSCRIBE
-# + HISTORY & LIVE CANDLE CLOSE LOGS
+# RajanTradeAutomation – main.py (FINAL FLOW-CORRECT VERSION)
+# HISTORY → SUBSCRIBE → LIVE
+# Candle logs → Render ONLY
 # ============================================================
 
 import os
@@ -45,8 +45,11 @@ fyers = fyersModel.FyersModel(
 # LOGGING
 # ============================================================
 def log(level, msg):
+    """Render + Google Sheets"""
     ts = datetime.now(IST).strftime("%H:%M:%S")
     print(f"[{ts}] {level} | {msg}")
+    if level == "CANDLE":
+        return
     try:
         requests.post(
             WEBAPP_URL,
@@ -58,6 +61,11 @@ def log(level, msg):
         )
     except Exception:
         pass
+
+def log_render(msg):
+    """Render ONLY"""
+    ts = datetime.now(IST).strftime("%H:%M:%S")
+    print(f"[{ts}] CANDLE | {msg}")
 
 log("SYSTEM", "main.py booted")
 
@@ -81,10 +89,8 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # GLOBAL STATE
 # ============================================================
 CANDLE_INTERVAL = 300
-
 SELECTED_STOCKS = set()
 CANDLES = {}
-
 LAST_CANDLE_TS = {}
 
 BIAS_DONE = False
@@ -123,17 +129,7 @@ def fetch_history(symbol, start_ts, end_ts):
     return []
 
 # ============================================================
-# HISTORY CANDLE LOG
-# ============================================================
-def log_history_candle(symbol, ts, c):
-    log(
-        "CANDLE",
-        f"HISTORY | {symbol} | {datetime.fromtimestamp(ts).strftime('%H:%M')} | "
-        f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={c['cum_vol']}"
-    )
-
-# ============================================================
-# LIVE CANDLE ENGINE + CLOSE LOG
+# LIVE CANDLE ENGINE (RENDER LOG ONLY)
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -153,11 +149,10 @@ def update_candle(msg):
     if last_ts and start > last_ts:
         prev = bucket.get(last_ts)
         if prev:
-            log(
-                "CANDLE",
+            log_render(
                 f"LIVE | {symbol} | {datetime.fromtimestamp(last_ts).strftime('%H:%M')} | "
-                f"O={prev['open']} H={prev['high']} "
-                f"L={prev['low']} C={prev['close']} V={prev['cum_vol']}"
+                f"O={prev['open']} H={prev['high']} L={prev['low']} "
+                f"C={prev['close']} V={prev['cum_vol']}"
             )
 
     LAST_CANDLE_TS[symbol] = start
@@ -185,41 +180,43 @@ def run_bias():
     from sector_engine import run_sector_bias
     log("BIAS", "Bias check started")
     result = run_sector_bias()
-    sectors = result.get("strong_sectors", [])
     stocks = set(result.get("selected_stocks", []))
-    for s in sectors:
-        log("SECTOR", f"{s['sector']} | {s['bias']} | up={s['up_pct']} down={s['down_pct']}")
     log("STOCKS", f"Selected={len(stocks)}")
     return stocks
 
 # ============================================================
-# MAIN CONTROLLER
+# MAIN CONTROLLER (FLOW CORRECT)
 # ============================================================
 def controller():
     global SELECTED_STOCKS, BIAS_DONE, SUBSCRIBED, C3_REPLACED
 
-    bias_dt_utc = ist_bias_datetime_utc(BIAS_TIME_STR)
+    bias_dt = ist_bias_datetime_utc(BIAS_TIME_STR)
     log("SYSTEM", f"Waiting for Bias Time IST={BIAS_TIME_STR}")
 
     while True:
         now = datetime.now(UTC)
 
-        if now >= bias_dt_utc and not BIAS_DONE:
+        if now >= bias_dt and not BIAS_DONE:
             SELECTED_STOCKS = run_bias()
             BIAS_DONE = True
 
-            ref = candle_start(int(bias_dt_utc.timestamp()))
+            ref = candle_start(int(bias_dt.timestamp()))
             c2 = ref - 300
             c1 = ref - 600
 
+            # ---------- HISTORY C1 & C2 ----------
             for s in SELECTED_STOCKS:
-                h = fetch_history(s, c1, ref + 300)
+                h = fetch_history(s, c1, ref)
                 for ts, o, h_, l, c, v in h:
                     candle = {"open": o, "high": h_, "low": l, "close": c, "cum_vol": v}
                     CANDLES.setdefault(s, {})[int(ts)] = candle
                     LAST_CANDLE_TS[s] = int(ts)
-                    log_history_candle(s, int(ts), candle)
+                    log_render(
+                        f"HISTORY | {s} | {datetime.fromtimestamp(ts).strftime('%H:%M')} | "
+                        f"O={o} H={h_} L={l} C={c} V={v}"
+                    )
 
+            # ---------- SUBSCRIBE AFTER HISTORY ----------
             fyers_ws.subscribe(list(SELECTED_STOCKS), "SymbolUpdate")
             SUBSCRIBED = True
             log("WS", f"Subscribed early {len(SELECTED_STOCKS)} stocks")
@@ -231,40 +228,4 @@ def controller():
 # ============================================================
 def on_message(msg): update_candle(msg)
 def on_error(msg): log("ERROR", f"WS error {msg}")
-def on_close(msg): log("WS", "WS closed")
-def on_connect(): log("WS", "WS connected")
-
-# ============================================================
-# START WS + CONTROLLER
-# ============================================================
-fyers_ws = data_ws.FyersDataSocket(
-    access_token=FYERS_ACCESS_TOKEN,
-    on_message=on_message,
-    on_error=on_error,
-    on_close=on_close,
-    on_connect=on_connect,
-    reconnect=True
-)
-
-threading.Thread(target=fyers_ws.connect, daemon=True).start()
-threading.Thread(target=controller, daemon=True).start()
-
-# ============================================================
-# FLASK ROUTES
-# ============================================================
-@app.route("/")
-def health():
-    return jsonify({"status": "ok", "bias_done": BIAS_DONE, "subscribed": SUBSCRIBED})
-
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    auth_code = request.args.get("auth_code") or request.args.get("code")
-    log("SYSTEM", f"FYERS redirect received | auth_code={auth_code}")
-    return jsonify({"status": "ok"})
-
-# ============================================================
-# START FLASK
-# ============================================================
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+d
