@@ -228,4 +228,4 @@ def controller():
 # ============================================================
 def on_message(msg): update_candle(msg)
 def on_error(msg): log("ERROR", f"WS error {msg}")
-d
+
