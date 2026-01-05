@@ -1,6 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL CORRECTED)
-# Render-safe | Flow-correct | No early exit
+# RajanTradeAutomation – main.py (FINAL – VERIFIED)
+# History → Subscribe → Live
+# Candle close logs → Render ONLY
 # ============================================================
 
 import os
@@ -79,16 +80,18 @@ def get_settings():
 
 SETTINGS = get_settings()
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
-
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 
 # ============================================================
 # GLOBAL STATE
 # ============================================================
 CANDLE_INTERVAL = 300
+
 SELECTED_STOCKS = set()
 CANDLES = {}
-LAST_CANDLE_TS = {}
+
+CURRENT_CANDLE_START = {}
+LAST_LOGGED_CANDLE_START = {}
 
 BIAS_DONE = False
 SUBSCRIBED = False
@@ -108,6 +111,9 @@ def safe_bias_time_utc(tstr):
         return None
 
 def candle_start(ts):
+    # FYERS timestamp normalization
+    if ts > 10**12:  # milliseconds → seconds
+        ts = ts // 1000
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
@@ -130,7 +136,7 @@ def fetch_history(symbol, start_ts, end_ts):
     return []
 
 # ============================================================
-# LIVE CANDLE ENGINE (Render only)
+# LIVE CANDLE ENGINE (RENDER ONLY)
 # ============================================================
 def update_candle(msg):
     try:
@@ -144,20 +150,27 @@ def update_candle(msg):
         if symbol not in SELECTED_STOCKS:
             return
 
+        if ts > 10**12:
+            ts = ts // 1000
+
         start = candle_start(ts)
         bucket = CANDLES.setdefault(symbol, {})
 
-        last_ts = LAST_CANDLE_TS.get(symbol)
-        if last_ts and start > last_ts:
-            prev = bucket.get(last_ts)
-            if prev:
-                log_render(
-                    f"LIVE | {symbol} | {datetime.fromtimestamp(last_ts).strftime('%H:%M')} | "
-                    f"O={prev['open']} H={prev['high']} L={prev['low']} "
-                    f"C={prev['close']} V={prev['cum_vol']}"
-                )
+        prev_start = CURRENT_CANDLE_START.get(symbol)
+        if prev_start is not None and start != prev_start:
+            if LAST_LOGGED_CANDLE_START.get(symbol) != prev_start:
+                prev = bucket.get(prev_start)
+                if prev:
+                    log_render(
+                        f"LIVE | {symbol} | "
+                        f"{datetime.fromtimestamp(prev_start).strftime('%H:%M')} | "
+                        f"O={prev['open']} H={prev['high']} "
+                        f"L={prev['low']} C={prev['close']} "
+                        f"V={prev['cum_vol']}"
+                    )
+                    LAST_LOGGED_CANDLE_START[symbol] = prev_start
 
-        LAST_CANDLE_TS[symbol] = start
+        CURRENT_CANDLE_START[symbol] = start
 
         c = bucket.get(start)
         if not c:
@@ -190,10 +203,10 @@ def run_bias():
     return stocks
 
 # ============================================================
-# MAIN CONTROLLER (FULLY GUARDED)
+# MAIN CONTROLLER (FLOW-CORRECT)
 # ============================================================
 def controller():
-    global SELECTED_STOCKS, BIAS_DONE, SUBSCRIBED
+    global SELECTED_STOCKS, BIAS_DONE, SUBSCRIBED, C3_REPLACED
 
     try:
         bias_dt = safe_bias_time_utc(BIAS_TIME_STR)
@@ -205,31 +218,56 @@ def controller():
         while True:
             now = datetime.now(UTC)
 
+            # -------- BIAS + HISTORY --------
             if now >= bias_dt and not BIAS_DONE:
                 SELECTED_STOCKS = run_bias()
                 BIAS_DONE = True
 
                 ref = candle_start(int(bias_dt.timestamp()))
-                c2 = ref - 300
                 c1 = ref - 600
+                c2 = ref - 300
 
                 # ---------- HISTORY C1 & C2 ----------
                 for s in SELECTED_STOCKS:
                     h = fetch_history(s, c1, ref)
                     for ts, o, h_, l, c, v in h:
-                        CANDLES.setdefault(s, {})[int(ts)] = {
-                            "open": o, "high": h_, "low": l, "close": c, "cum_vol": v
+                        ts = int(ts)
+                        CANDLES.setdefault(s, {})[ts] = {
+                            "open": o, "high": h_, "low": l,
+                            "close": c, "cum_vol": v
                         }
-                        LAST_CANDLE_TS[s] = int(ts)
+                        CURRENT_CANDLE_START[s] = ts
+                        LAST_LOGGED_CANDLE_START[s] = ts
                         log_render(
-                            f"HISTORY | {s} | {datetime.fromtimestamp(ts).strftime('%H:%M')} | "
+                            f"HISTORY | {s} | "
+                            f"{datetime.fromtimestamp(ts).strftime('%H:%M')} | "
                             f"O={o} H={h_} L={l} C={c} V={v}"
                         )
 
-                # ---------- SUBSCRIBE AFTER HISTORY ----------
+                # ---------- SUBSCRIBE ----------
                 fyers_ws.subscribe(list(SELECTED_STOCKS), "SymbolUpdate")
                 SUBSCRIBED = True
                 log("WS", f"Subscribed early {len(SELECTED_STOCKS)} stocks")
+
+            # -------- C3 HISTORY REPLACE --------
+            if BIAS_DONE and SUBSCRIBED and not C3_REPLACED:
+                ref = candle_start(int(bias_dt.timestamp()))
+                if int(time.time()) >= ref + 60:
+                    for s in SELECTED_STOCKS:
+                        h = fetch_history(s, ref, ref + 300)
+                        if h:
+                            ts, o, h_, l, c, v = h[-1]
+                            ts = int(ts)
+                            CANDLES.setdefault(s, {})[ts] = {
+                                "open": o, "high": h_, "low": l,
+                                "close": c, "cum_vol": v
+                            }
+                            log_render(
+                                f"REPLACE | {s} | "
+                                f"{datetime.fromtimestamp(ts).strftime('%H:%M')} | "
+                                f"O={o} H={h_} L={l} C={c} V={v}"
+                            )
+                    C3_REPLACED = True
 
             time.sleep(1)
 
@@ -277,7 +315,7 @@ def fyers_redirect():
     return jsonify({"status": "ok"})
 
 # ============================================================
-# START FLASK (Render-safe)
+# START FLASK
 # ============================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
