@@ -1,19 +1,22 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY DEBUG VERSION
+# HISTORY ONLY – FINAL DEBUG (FIXED)
+#
 # Scope:
-#   - Read BIAS_TIME from Settings
-#   - Run Bias at BIAS_TIME
-#   - Select stocks
-#   - Fetch EXACT two historical candles (C1, C2)
-#   - Log EVERYTHING (success + empty + errors)
-# NO WS / NO LIVE / NO SUBSCRIBE
+#   1) Read BIAS_TIME from Settings Sheet
+#   2) Run Bias at BIAS_TIME
+#   3) Select stocks
+#   4) Fetch EXACT two historical candles (C1, C2)
+#   5) Log EVERYTHING (Render + Logs sheet)
+#
+# NO WS | NO LIVE | NO SUBSCRIBE | NO REPLACE
 # ============================================================
 
 import os
 import time
+import threading
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 from flask import Flask, jsonify, request
 from fyers_apiv3 import fyersModel
@@ -46,7 +49,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (Render + Sheets)
+# LOGGING (Render + Google Sheets)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -94,7 +97,7 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # ============================================================
 # HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300  # 5 min
+CANDLE_INTERVAL = 300  # 5 minutes
 
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -106,10 +109,11 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (STRICT)
+# HISTORY FETCH (FIXED: date_format = 0)
 # ============================================================
 def fetch_history(symbol, start_ts, end_ts):
-    log("HISTORY_FETCH",
+    log(
+        "HISTORY_FETCH",
         f"{symbol} | from={start_ts} ({datetime.fromtimestamp(start_ts).strftime('%H:%M:%S')}) "
         f"to={end_ts} ({datetime.fromtimestamp(end_ts).strftime('%H:%M:%S')})"
     )
@@ -117,19 +121,22 @@ def fetch_history(symbol, start_ts, end_ts):
         res = fyers.history({
             "symbol": symbol,
             "resolution": "5",
-            "date_format": "1",
+            "date_format": "0",   # ✅ FIXED
             "range_from": int(start_ts),
             "range_to": int(end_ts),
             "cont_flag": "1"
         })
+
         if res.get("s") == "ok":
             candles = res.get("candles", [])
             log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
             return candles
         else:
             log("HISTORY_ERROR", f"{symbol} | response={res}")
+
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
+
     return []
 
 # ============================================================
@@ -167,15 +174,16 @@ def controller():
 
         # -------- CALCULATE EXACT C1 / C2 --------
         bias_ts = int(bias_dt.timestamp())
-        ref_end = floor_5min(bias_ts)   # completed candle end
-
-        c2_start = ref_end - 300
-        c2_end   = ref_end
+        ref_end = floor_5min(bias_ts)
 
         c1_start = ref_end - 600
         c1_end   = ref_end - 300
 
-        log("SYSTEM",
+        c2_start = ref_end - 300
+        c2_end   = ref_end
+
+        log(
+            "SYSTEM",
             f"C1={datetime.fromtimestamp(c1_start).strftime('%H:%M')}→{datetime.fromtimestamp(c1_end).strftime('%H:%M')} | "
             f"C2={datetime.fromtimestamp(c2_start).strftime('%H:%M')}→{datetime.fromtimestamp(c2_end).strftime('%H:%M')}"
         )
@@ -183,7 +191,7 @@ def controller():
         # -------- FETCH HISTORY --------
         for symbol in selected:
 
-            # --- C1 ---
+            # ---- C1 ----
             h1 = fetch_history(symbol, c1_start, c1_end)
             if not h1:
                 log("HISTORY_EMPTY", f"{symbol} | C1 EMPTY")
@@ -194,7 +202,7 @@ def controller():
                     f"O={o} H={h} L={l} C={c} V={v}"
                 )
 
-            # --- C2 ---
+            # ---- C2 ----
             h2 = fetch_history(symbol, c2_start, c2_end)
             if not h2:
                 log("HISTORY_EMPTY", f"{symbol} | C2 EMPTY")
@@ -215,7 +223,10 @@ def controller():
 # ============================================================
 @app.route("/")
 def health():
-    return jsonify({"status": "ok", "mode": "HISTORY_ONLY"})
+    return jsonify({
+        "status": "ok",
+        "mode": "HISTORY_ONLY"
+    })
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -226,7 +237,6 @@ def fyers_redirect():
 # ============================================================
 # START
 # ============================================================
-import threading
 threading.Thread(target=controller, daemon=True).start()
 
 if __name__ == "__main__":
