@@ -1,13 +1,19 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (Live disabled, Framework intact)
+# HISTORY ONLY DEBUG VERSION
+# Scope:
+#   - Read BIAS_TIME from Settings
+#   - Run Bias at BIAS_TIME
+#   - Select stocks
+#   - Fetch EXACT two historical candles (C1, C2)
+#   - Log EVERYTHING (success + empty + errors)
+# NO WS / NO LIVE / NO SUBSCRIBE
 # ============================================================
 
 import os
 import time
-import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from flask import Flask, jsonify, request
 from fyers_apiv3 import fyersModel
@@ -16,6 +22,7 @@ from fyers_apiv3 import fyersModel
 # TIMEZONES
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
+UTC = pytz.utc
 
 # ============================================================
 # ENV
@@ -39,7 +46,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING
+# LOGGING (Render + Sheets)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -47,27 +54,37 @@ def log(level, msg):
     try:
         requests.post(
             WEBAPP_URL,
-            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
+            json={
+                "action": "pushLog",
+                "payload": {
+                    "level": level,
+                    "message": msg
+                }
+            },
             timeout=3
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[{ts}] LOG_FAIL | {e}")
 
 def log_render(msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
     print(f"[{ts}] CANDLE | {msg}")
 
-log("SYSTEM", "main.py booted (HISTORY ONLY)")
+log("SYSTEM", "main.py HISTORY-ONLY booted")
 
 # ============================================================
 # SETTINGS
 # ============================================================
 def get_settings():
     try:
-        r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5)
+        r = requests.post(
+            WEBAPP_URL,
+            json={"action": "getSettings"},
+            timeout=5
+        )
         return r.json().get("settings", {})
     except Exception as e:
-        log("ERROR", f"Settings read failed: {e}")
+        log("ERROR", f"Settings fetch failed: {e}")
         return {}
 
 SETTINGS = get_settings()
@@ -75,90 +92,126 @@ BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 
 # ============================================================
-# TIME HELPERS
+# HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300
+CANDLE_INTERVAL = 300  # 5 min
 
-def floor_5min(ts: int) -> int:
+def parse_bias_time_utc(tstr):
+    t = datetime.strptime(tstr, "%H:%M:%S").time()
+    ist_now = datetime.now(IST)
+    ist_dt = IST.localize(datetime.combine(ist_now.date(), t))
+    return ist_dt.astimezone(UTC)
+
+def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-def bias_time_epoch(tstr: str) -> int:
-    t = datetime.strptime(tstr, "%H:%M:%S").time()
-    now_ist = datetime.now(IST)
-    bias_dt = IST.localize(datetime.combine(now_ist.date(), t))
-    return int(bias_dt.timestamp())
-
 # ============================================================
-# HISTORY FETCH
+# HISTORY FETCH (STRICT)
 # ============================================================
 def fetch_history(symbol, start_ts, end_ts):
+    log("HISTORY_FETCH",
+        f"{symbol} | from={start_ts} ({datetime.fromtimestamp(start_ts).strftime('%H:%M:%S')}) "
+        f"to={end_ts} ({datetime.fromtimestamp(end_ts).strftime('%H:%M:%S')})"
+    )
     try:
         res = fyers.history({
             "symbol": symbol,
             "resolution": "5",
-            "date_format": "0",   # epoch
+            "date_format": "1",
             "range_from": int(start_ts),
             "range_to": int(end_ts),
             "cont_flag": "1"
         })
         if res.get("s") == "ok":
-            return res.get("candles", [])
+            candles = res.get("candles", [])
+            log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
+            return candles
+        else:
+            log("HISTORY_ERROR", f"{symbol} | response={res}")
     except Exception as e:
-        log("ERROR", f"History error {symbol}: {e}")
+        log("ERROR", f"History exception {symbol}: {e}")
     return []
 
 # ============================================================
-# CONTROLLER (Bias → 2 History Candles)
+# SECTOR BIAS
+# ============================================================
+def run_bias():
+    from sector_engine import run_sector_bias
+    log("BIAS", "Bias check started")
+    result = run_sector_bias()
+    stocks = result.get("selected_stocks", [])
+    log("STOCKS", f"Selected={len(stocks)}")
+    return stocks
+
+# ============================================================
+# CONTROLLER (HISTORY ONLY)
 # ============================================================
 def controller():
     try:
-        from sector_engine import run_sector_bias
-
-        log("BIAS", "Bias check started")
-        result = run_sector_bias()
-        stocks = result.get("selected_stocks", [])
-
-        log("STOCKS", f"Selected={len(stocks)}")
-        if not stocks:
+        if not BIAS_TIME_STR:
+            log("ERROR", "BIAS_TIME missing")
             return
 
-        bias_ts = bias_time_epoch(BIAS_TIME_STR)
-        ref = floor_5min(bias_ts)
-        c1 = ref - 600
-        c2 = ref - 300
+        bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
+        log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
 
-        log(
-            "SYSTEM",
-            f"History window "
-            f"{datetime.fromtimestamp(c1, IST).strftime('%H:%M')} → "
-            f"{datetime.fromtimestamp(ref, IST).strftime('%H:%M')}"
+        # -------- WAIT FOR BIAS TIME --------
+        while datetime.now(UTC) < bias_dt:
+            time.sleep(1)
+
+        # -------- RUN BIAS --------
+        selected = run_bias()
+        if not selected:
+            log("ERROR", "No stocks selected")
+            return
+
+        # -------- CALCULATE EXACT C1 / C2 --------
+        bias_ts = int(bias_dt.timestamp())
+        ref_end = floor_5min(bias_ts)   # completed candle end
+
+        c2_start = ref_end - 300
+        c2_end   = ref_end
+
+        c1_start = ref_end - 600
+        c1_end   = ref_end - 300
+
+        log("SYSTEM",
+            f"C1={datetime.fromtimestamp(c1_start).strftime('%H:%M')}→{datetime.fromtimestamp(c1_end).strftime('%H:%M')} | "
+            f"C2={datetime.fromtimestamp(c2_start).strftime('%H:%M')}→{datetime.fromtimestamp(c2_end).strftime('%H:%M')}"
         )
 
-        for s in stocks:
-            candles = fetch_history(s, c1, ref)
-            if not candles:
-                log("WARN", f"No history for {s}")
-                continue
+        # -------- FETCH HISTORY --------
+        for symbol in selected:
 
-            for ts, o, h, l, c, v in candles:
+            # --- C1 ---
+            h1 = fetch_history(symbol, c1_start, c1_end)
+            if not h1:
+                log("HISTORY_EMPTY", f"{symbol} | C1 EMPTY")
+            for ts, o, h, l, c, v in h1:
                 log_render(
-                    f"HISTORY | {s} | "
-                    f"{datetime.fromtimestamp(int(ts), IST).strftime('%H:%M')} | "
+                    f"HISTORY | {symbol} | "
+                    f"{datetime.fromtimestamp(int(ts)).strftime('%H:%M')} | "
                     f"O={o} H={h} L={l} C={c} V={v}"
                 )
 
-        log("SYSTEM", "HISTORY PHASE COMPLETE")
+            # --- C2 ---
+            h2 = fetch_history(symbol, c2_start, c2_end)
+            if not h2:
+                log("HISTORY_EMPTY", f"{symbol} | C2 EMPTY")
+            for ts, o, h, l, c, v in h2:
+                log_render(
+                    f"HISTORY | {symbol} | "
+                    f"{datetime.fromtimestamp(int(ts)).strftime('%H:%M')} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
+                )
+
+        log("SYSTEM", "HISTORY FETCH COMPLETE")
 
     except Exception as e:
         log("ERROR", f"Controller crashed: {e}")
 
 # ============================================================
-# START CONTROLLER
-# ============================================================
-threading.Thread(target=controller, daemon=True).start()
-
-# ============================================================
-# FLASK ROUTES (INTACT)
+# FLASK ROUTES
 # ============================================================
 @app.route("/")
 def health():
@@ -171,8 +224,11 @@ def fyers_redirect():
     return jsonify({"status": "ok"})
 
 # ============================================================
-# START FLASK
+# START
 # ============================================================
+import threading
+threading.Thread(target=controller, daemon=True).start()
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
