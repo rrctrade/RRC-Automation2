@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# PHASE-2 : History + Bias + LIVE WS (C3 onward)
+# FINAL PHASE-2
+# History (C1, C2) → WS Subscribe → Live Candles
 # ============================================================
 
 import os
@@ -70,7 +71,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py PHASE-2 (History + Bias + LIVE WS) booted")
+log("SYSTEM", "main.py FINAL PHASE-2 booted")
 
 # ============================================================
 # SETTINGS
@@ -101,7 +102,7 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (UNCHANGED)
+# HISTORY FETCH (LOCKED)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
@@ -144,7 +145,7 @@ def run_bias():
     selected = result.get("selected_stocks", [])
 
     if not strong_sectors:
-        log("SECTOR_BIAS", "No strong sector – NO TRADE DAY")
+        log("SYSTEM", "No strong sector – NO TRADE DAY")
         return []
 
     for s in strong_sectors:
@@ -178,7 +179,6 @@ def on_ticks(message):
                 "h": ltp,
                 "l": ltp,
                 "c": ltp,
-                "v": 0
             }
             live_candles[symbol] = c
         else:
@@ -202,14 +202,20 @@ def start_ws(symbols):
         reconnect=True
     )
 
+    def on_connect():
+        log("WS", "WebSocket connected")
+        time.sleep(1.5)
+        ws.subscribe(symbols=symbols, data_type="symbolData")
+        log("WS", f"Subscribed {len(symbols)} symbols")
+
     ws.on_ticks = on_ticks
-    ws.on_connect = lambda: ws.subscribe(symbols=symbols, data_type="symbolData")
+    ws.on_connect = on_connect
 
     log("WS", f"Connecting WS for {len(symbols)} symbols")
     ws.connect()
 
 # ============================================================
-# CONTROLLER
+# CONTROLLER (ORDER GUARANTEED)
 # ============================================================
 def controller():
     if not BIAS_TIME_STR:
@@ -222,11 +228,12 @@ def controller():
     while datetime.now(UTC) < bias_dt:
         time.sleep(1)
 
+    # STEP 1: Bias + Selection
     selected = run_bias()
     if not selected:
-        log("SYSTEM", "No stocks selected – stopping")
         return
 
+    # STEP 2: History C1 + C2
     bias_ts = int(bias_dt.timestamp())
     ref_end = floor_5min(bias_ts)
 
@@ -243,7 +250,9 @@ def controller():
                 f"O={o} H={h} L={l} C={c} V={v}"
             )
 
-    log("SYSTEM", "HISTORY COMPLETE → STARTING LIVE WS")
+    log("SYSTEM", "History COMPLETE – starting WS")
+
+    # STEP 3: WS AFTER history
     start_ws(selected)
 
 # ============================================================
