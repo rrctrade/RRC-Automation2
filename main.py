@@ -1,13 +1,15 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY – FINAL DEBUG (FIXED)
+# FINAL HISTORY-ONLY DEBUG VERSION
 #
-# Scope:
-#   1) Read BIAS_TIME from Settings Sheet
-#   2) Run Bias at BIAS_TIME
-#   3) Select stocks
-#   4) Fetch EXACT two historical candles (C1, C2)
-#   5) Log EVERYTHING (Render + Logs sheet)
+# Features:
+# 1) Read BIAS_TIME from Settings
+# 2) Run Sector Bias
+#    - Log Sector, BUY/SELL, Advance %, Decline %
+# 3) Select stocks
+# 4) Fetch EXACT 2 historical candles BEFORE bias candle
+# 5) Render logs in IST (FYERS app style)
+# 6) Full Logs sheet visibility
 #
 # NO WS | NO LIVE | NO SUBSCRIBE | NO REPLACE
 # ============================================================
@@ -49,7 +51,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (Render + Google Sheets)
+# LOGGING
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -59,10 +61,7 @@ def log(level, msg):
             WEBAPP_URL,
             json={
                 "action": "pushLog",
-                "payload": {
-                    "level": level,
-                    "message": msg
-                }
+                "payload": {"level": level, "message": msg}
             },
             timeout=3
         )
@@ -73,7 +72,10 @@ def log_render(msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
     print(f"[{ts}] CANDLE | {msg}")
 
-log("SYSTEM", "main.py HISTORY-ONLY booted")
+def fmt_ist(ts):
+    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M")
+
+log("SYSTEM", "main.py FINAL HISTORY-ONLY booted")
 
 # ============================================================
 # SETTINGS
@@ -97,7 +99,7 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # ============================================================
 # HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300  # 5 minutes
+CANDLE_INTERVAL = 300  # 5 min
 
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -109,19 +111,18 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (FIXED: date_format = 0)
+# HISTORY FETCH (epoch mode)
 # ============================================================
 def fetch_history(symbol, start_ts, end_ts):
     log(
         "HISTORY_FETCH",
-        f"{symbol} | from={start_ts} ({datetime.fromtimestamp(start_ts).strftime('%H:%M:%S')}) "
-        f"to={end_ts} ({datetime.fromtimestamp(end_ts).strftime('%H:%M:%S')})"
+        f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST"
     )
     try:
         res = fyers.history({
             "symbol": symbol,
             "resolution": "5",
-            "date_format": "0",   # ✅ FIXED
+            "date_format": "0",  # epoch timestamps
             "range_from": int(start_ts),
             "range_to": int(end_ts),
             "cont_flag": "1"
@@ -144,10 +145,22 @@ def fetch_history(symbol, start_ts, end_ts):
 # ============================================================
 def run_bias():
     from sector_engine import run_sector_bias
+
     log("BIAS", "Bias check started")
     result = run_sector_bias()
+
+    bias = result.get("bias")
+    sector = result.get("sector")
+    adv = result.get("advance_pct")
+    dec = result.get("decline_pct")
     stocks = result.get("selected_stocks", [])
+
+    log(
+        "SECTOR_BIAS",
+        f"Sector={sector} | Bias={bias} | Advance={adv}% | Decline={dec}%"
+    )
     log("STOCKS", f"Selected={len(stocks)}")
+
     return stocks
 
 # ============================================================
@@ -162,54 +175,54 @@ def controller():
         bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
         log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
 
-        # -------- WAIT FOR BIAS TIME --------
+        # ---- WAIT FOR BIAS TIME ----
         while datetime.now(UTC) < bias_dt:
             time.sleep(1)
 
-        # -------- RUN BIAS --------
+        # ---- RUN BIAS ----
         selected = run_bias()
         if not selected:
             log("ERROR", "No stocks selected")
             return
 
-        # -------- CALCULATE EXACT C1 / C2 --------
+        # ---- CALCULATE CORRECT C1 / C2 ----
         bias_ts = int(bias_dt.timestamp())
-        ref_end = floor_5min(bias_ts)
 
-        c1_start = ref_end - 600
-        c1_end   = ref_end - 300
+        # Exclude bias candle completely
+        ref_end = floor_5min(bias_ts) - 300
 
         c2_start = ref_end - 300
         c2_end   = ref_end
 
+        c1_start = ref_end - 600
+        c1_end   = ref_end - 300
+
         log(
             "SYSTEM",
-            f"C1={datetime.fromtimestamp(c1_start).strftime('%H:%M')}→{datetime.fromtimestamp(c1_end).strftime('%H:%M')} | "
-            f"C2={datetime.fromtimestamp(c2_start).strftime('%H:%M')}→{datetime.fromtimestamp(c2_end).strftime('%H:%M')}"
+            f"C1={fmt_ist(c1_start)}→{fmt_ist(c1_end)} | "
+            f"C2={fmt_ist(c2_start)}→{fmt_ist(c2_end)} IST"
         )
 
-        # -------- FETCH HISTORY --------
+        # ---- FETCH HISTORY ----
         for symbol in selected:
 
-            # ---- C1 ----
+            # C1
             h1 = fetch_history(symbol, c1_start, c1_end)
             if not h1:
                 log("HISTORY_EMPTY", f"{symbol} | C1 EMPTY")
             for ts, o, h, l, c, v in h1:
                 log_render(
-                    f"HISTORY | {symbol} | "
-                    f"{datetime.fromtimestamp(int(ts)).strftime('%H:%M')} | "
+                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
                     f"O={o} H={h} L={l} C={c} V={v}"
                 )
 
-            # ---- C2 ----
+            # C2
             h2 = fetch_history(symbol, c2_start, c2_end)
             if not h2:
                 log("HISTORY_EMPTY", f"{symbol} | C2 EMPTY")
             for ts, o, h, l, c, v in h2:
                 log_render(
-                    f"HISTORY | {symbol} | "
-                    f"{datetime.fromtimestamp(int(ts)).strftime('%H:%M')} | "
+                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
                     f"O={o} H={h} L={l} C={c} V={v}"
                 )
 
@@ -223,10 +236,7 @@ def controller():
 # ============================================================
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "mode": "HISTORY_ONLY"
-    })
+    return jsonify({"status": "ok", "mode": "HISTORY_ONLY_FINAL"})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
