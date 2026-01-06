@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FINAL: HISTORY + CORRECT SECTOR BIAS INTEGRATION
+# FINAL – HISTORY + SECTOR BIAS (NO DUPLICATES)
 # ============================================================
 
 import os
@@ -69,7 +69,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL HISTORY+BIAS booted (logs cleared)")
+log("SYSTEM", "main.py FINAL (duplicate-free history) booted")
 
 # ============================================================
 # SETTINGS
@@ -100,10 +100,19 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH
+# HISTORY FETCH (SINGLE CALL – NO DUPLICATES)
 # ============================================================
-def fetch_history(symbol, start_ts, end_ts):
-    log("HISTORY_FETCH", f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST")
+def fetch_two_history_candles(symbol, end_ts):
+    """
+    Fetch exactly last 2 completed candles before end_ts
+    """
+    start_ts = end_ts - 600
+
+    log(
+        "HISTORY_FETCH",
+        f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST"
+    )
+
     try:
         res = fyers.history({
             "symbol": symbol,
@@ -113,18 +122,21 @@ def fetch_history(symbol, start_ts, end_ts):
             "range_to": int(end_ts),
             "cont_flag": "1"
         })
+
         if res.get("s") == "ok":
             candles = res.get("candles", [])
             log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
             return candles
-        else:
-            log("HISTORY_ERROR", f"{symbol} | response={res}")
+
+        log("HISTORY_ERROR", f"{symbol} | response={res}")
+
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
+
     return []
 
 # ============================================================
-# SECTOR BIAS (CORRECT INTEGRATION)
+# SECTOR BIAS
 # ============================================================
 def run_bias():
     from sector_engine import run_sector_bias
@@ -136,7 +148,7 @@ def run_bias():
     selected = result.get("selected_stocks", [])
 
     if not strong_sectors:
-        log("SECTOR_BIAS", "No strong sector found – NO TRADE DAY")
+        log("SECTOR_BIAS", "No strong sector – NO TRADE DAY")
         return []
 
     for s in strong_sectors:
@@ -172,21 +184,19 @@ def controller():
         bias_ts = int(bias_dt.timestamp())
         ref_end = floor_5min(bias_ts)
 
-        c2_start, c2_end = ref_end - 300, ref_end
-        c1_start, c1_end = ref_end - 600, ref_end - 300
-
         log(
             "SYSTEM",
-            f"C1={fmt_ist(c1_start)}→{fmt_ist(c1_end)} | "
-            f"C2={fmt_ist(c2_start)}→{fmt_ist(c2_end)} IST"
+            f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST"
         )
 
         for symbol in selected:
-            for ts, o, h, l, c, v in fetch_history(symbol, c1_start, c1_end):
-                log_render(f"HISTORY | {symbol} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
+            candles = fetch_two_history_candles(symbol, ref_end)
 
-            for ts, o, h, l, c, v in fetch_history(symbol, c2_start, c2_end):
-                log_render(f"HISTORY | {symbol} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
+            for ts, o, h, l, c, v in candles:
+                log_render(
+                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
+                )
 
         log("SYSTEM", "HISTORY FETCH COMPLETE")
 
@@ -198,7 +208,7 @@ def controller():
 # ============================================================
 @app.route("/")
 def health():
-    return jsonify({"status": "ok", "mode": "HISTORY+BIAS"})
+    return jsonify({"status": "ok", "mode": "HISTORY+BIAS_NO_DUP"})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
