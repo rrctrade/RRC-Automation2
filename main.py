@@ -1,8 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FINAL STABLE VERSION
-# History + Sector Bias
-# (ONLY FIX: FYERS inclusive boundary handled)
+# PHASE-2 : History + Bias + LIVE WS (C3 onward)
 # ============================================================
 
 import os
@@ -13,6 +11,7 @@ from datetime import datetime
 import pytz
 from flask import Flask, jsonify, request
 from fyers_apiv3 import fyersModel
+from fyers_apiv3.FyersWebsocket import data_ws
 
 # ============================================================
 # TIMEZONES
@@ -58,20 +57,20 @@ def log(level, msg):
 
 def log_render(msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] CANDLE | {msg}")
+    print(f"[{ts}] LIVE | {msg}")
 
 def fmt_ist(ts):
-    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M")
+    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 # ============================================================
-# CLEAR LOGS ON DEPLOY (as before)
+# CLEAR LOGS ON DEPLOY
 # ============================================================
 try:
     requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (stable history + bias) booted")
+log("SYSTEM", "main.py PHASE-2 (History + Bias + LIVE WS) booted")
 
 # ============================================================
 # SETTINGS
@@ -102,7 +101,7 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (SINGLE CALL, NO DUPLICATE, NO EXTRA CANDLE)
+# HISTORY FETCH (UNCHANGED)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
@@ -118,7 +117,7 @@ def fetch_two_history_candles(symbol, end_ts):
             "resolution": "5",
             "date_format": "0",
             "range_from": int(start_ts),
-            "range_to": int(end_ts - 1),   # 🔒 ONLY FIX
+            "range_to": int(end_ts - 1),
             "cont_flag": "1"
         })
 
@@ -127,15 +126,13 @@ def fetch_two_history_candles(symbol, end_ts):
             log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
             return candles
 
-        log("HISTORY_ERROR", f"{symbol} | response={res}")
-
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
 
     return []
 
 # ============================================================
-# SECTOR BIAS (UNCHANGED, WORKING)
+# SECTOR BIAS
 # ============================================================
 def run_bias():
     from sector_engine import run_sector_bias
@@ -161,45 +158,93 @@ def run_bias():
     return selected
 
 # ============================================================
-# CONTROLLER (UNCHANGED STRUCTURE)
+# LIVE WS CANDLE ENGINE (SIMPLE)
 # ============================================================
-def controller():
+live_candles = {}
+
+def on_ticks(message):
     try:
-        if not BIAS_TIME_STR:
-            log("ERROR", "BIAS_TIME missing")
-            return
+        symbol = message["symbol"]
+        ltp = message["ltp"]
+        ts = int(message["timestamp"])
 
-        bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-        log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
+        bucket = floor_5min(ts)
 
-        while datetime.now(UTC) < bias_dt:
-            time.sleep(1)
+        c = live_candles.get(symbol)
+        if not c or c["bucket"] != bucket:
+            c = {
+                "bucket": bucket,
+                "o": ltp,
+                "h": ltp,
+                "l": ltp,
+                "c": ltp,
+                "v": 0
+            }
+            live_candles[symbol] = c
+        else:
+            c["h"] = max(c["h"], ltp)
+            c["l"] = min(c["l"], ltp)
+            c["c"] = ltp
 
-        selected = run_bias()
-        if not selected:
-            log("SYSTEM", "No stocks selected – stopping")
-            return
-
-        bias_ts = int(bias_dt.timestamp())
-        ref_end = floor_5min(bias_ts)
-
-        log(
-            "SYSTEM",
-            f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST"
+        log_render(
+            f"CANDLE | {symbol} | {fmt_ist(bucket)} | "
+            f"O={c['o']} H={c['h']} L={c['l']} C={c['c']}"
         )
 
-        for symbol in selected:
-            candles = fetch_two_history_candles(symbol, ref_end)
-            for ts, o, h, l, c, v in candles:
-                log_render(
-                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
-                    f"O={o} H={h} L={l} C={c} V={v}"
-                )
-
-        log("SYSTEM", "HISTORY FETCH COMPLETE")
-
     except Exception as e:
-        log("ERROR", f"Controller crashed: {e}")
+        log("ERROR", f"Tick error: {e}")
+
+def start_ws(symbols):
+    ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        log_path="",
+        litemode=True,
+        reconnect=True
+    )
+
+    ws.on_ticks = on_ticks
+    ws.on_connect = lambda: ws.subscribe(symbols=symbols, data_type="symbolData")
+
+    log("WS", f"Connecting WS for {len(symbols)} symbols")
+    ws.connect()
+
+# ============================================================
+# CONTROLLER
+# ============================================================
+def controller():
+    if not BIAS_TIME_STR:
+        log("ERROR", "BIAS_TIME missing")
+        return
+
+    bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
+    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
+
+    while datetime.now(UTC) < bias_dt:
+        time.sleep(1)
+
+    selected = run_bias()
+    if not selected:
+        log("SYSTEM", "No stocks selected – stopping")
+        return
+
+    bias_ts = int(bias_dt.timestamp())
+    ref_end = floor_5min(bias_ts)
+
+    log(
+        "SYSTEM",
+        f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST"
+    )
+
+    for symbol in selected:
+        candles = fetch_two_history_candles(symbol, ref_end)
+        for ts, o, h, l, c, v in candles:
+            log_render(
+                f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+                f"O={o} H={h} L={l} C={c} V={v}"
+            )
+
+    log("SYSTEM", "HISTORY COMPLETE → STARTING LIVE WS")
+    start_ws(selected)
 
 # ============================================================
 # FLASK ROUTES
@@ -215,7 +260,7 @@ def fyers_redirect():
     return jsonify({"status": "ok"})
 
 # ============================================================
-# START (AS BEFORE – STABLE)
+# START
 # ============================================================
 threading.Thread(target=controller, daemon=True).start()
 
