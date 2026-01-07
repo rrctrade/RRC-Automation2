@@ -1,6 +1,8 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2) – RENDER SHOWS OHLCV
+# HISTORY ONLY (C1, C2)
+# Render logs show OHLCV for ALL stocks
+# Logs sheet CLEAN
 # ============================================================
 
 import os
@@ -48,10 +50,7 @@ def log(level, msg):
     try:
         requests.post(
             WEBAPP_URL,
-            json={
-                "action": "pushLog",
-                "payload": {"level": level, "message": msg}
-            },
+            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
             timeout=3
         )
     except Exception:
@@ -72,7 +71,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY (RENDER OHLCV) booted")
+log("SYSTEM", "main.py HISTORY-ONLY booted")
 
 # ============================================================
 # SETTINGS
@@ -92,7 +91,7 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # ============================================================
 # HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300  # 5 min
+CANDLE_INTERVAL = 300
 
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -117,10 +116,8 @@ def fetch_two_history_candles(symbol, end_ts):
             "range_to": int(end_ts - 1),
             "cont_flag": "1"
         })
-
         if res.get("s") == "ok":
             return res.get("candles", [])
-
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
 
@@ -175,10 +172,7 @@ def controller():
     bias_ts = int(bias_dt.timestamp())
     ref_end = floor_5min(bias_ts)
 
-    log(
-        "SYSTEM",
-        f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST"
-    )
+    log("SYSTEM", f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST")
 
     for symbol in selected:
         candles = fetch_two_history_candles(symbol, ref_end)
@@ -190,7 +184,7 @@ def controller():
                 f"O={o} H={h} L={l} C={c} V={v}"
             )
 
-    log("SYSTEM", "History COMPLETE (C1, C2 rendered)")
+    log("SYSTEM", "History COMPLETE (C1, C2 rendered in RENDER logs)")
 
 # ============================================================
 # FLASK ROUTES
