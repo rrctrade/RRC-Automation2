@@ -1,7 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FINAL PHASE-2
-# History (C1, C2) → WS Subscribe → Live Candles
+# HISTORY ONLY (C1, C2)
 # ============================================================
 
 import os
@@ -12,7 +11,6 @@ from datetime import datetime
 import pytz
 from flask import Flask, jsonify, request
 from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws
 
 # ============================================================
 # TIMEZONES
@@ -42,7 +40,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING
+# LOGGING (Render + Sheets)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -58,7 +56,7 @@ def log(level, msg):
 
 def log_render(msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] LIVE | {msg}")
+    print(f"[{ts}] {msg}")
 
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
@@ -71,7 +69,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL PHASE-2 booted")
+log("SYSTEM", "main.py HISTORY-ONLY booted")
 
 # ============================================================
 # SETTINGS
@@ -159,63 +157,7 @@ def run_bias():
     return selected
 
 # ============================================================
-# LIVE WS CANDLE ENGINE (SIMPLE)
-# ============================================================
-live_candles = {}
-
-def on_ticks(message):
-    try:
-        symbol = message["symbol"]
-        ltp = message["ltp"]
-        ts = int(message["timestamp"])
-
-        bucket = floor_5min(ts)
-
-        c = live_candles.get(symbol)
-        if not c or c["bucket"] != bucket:
-            c = {
-                "bucket": bucket,
-                "o": ltp,
-                "h": ltp,
-                "l": ltp,
-                "c": ltp,
-            }
-            live_candles[symbol] = c
-        else:
-            c["h"] = max(c["h"], ltp)
-            c["l"] = min(c["l"], ltp)
-            c["c"] = ltp
-
-        log_render(
-            f"CANDLE | {symbol} | {fmt_ist(bucket)} | "
-            f"O={c['o']} H={c['h']} L={c['l']} C={c['c']}"
-        )
-
-    except Exception as e:
-        log("ERROR", f"Tick error: {e}")
-
-def start_ws(symbols):
-    ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        log_path="",
-        litemode=True,
-        reconnect=True
-    )
-
-    def on_connect():
-        log("WS", "WebSocket connected")
-        time.sleep(1.5)
-        ws.subscribe(symbols=symbols, data_type="symbolData")
-        log("WS", f"Subscribed {len(symbols)} symbols")
-
-    ws.on_ticks = on_ticks
-    ws.on_connect = on_connect
-
-    log("WS", f"Connecting WS for {len(symbols)} symbols")
-    ws.connect()
-
-# ============================================================
-# CONTROLLER (ORDER GUARANTEED)
+# CONTROLLER (HISTORY ONLY)
 # ============================================================
 def controller():
     if not BIAS_TIME_STR:
@@ -250,10 +192,7 @@ def controller():
                 f"O={o} H={h} L={l} C={c} V={v}"
             )
 
-    log("SYSTEM", "History COMPLETE – starting WS")
-
-    # STEP 3: WS AFTER history
-    start_ws(selected)
+    log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
 # ============================================================
 # FLASK ROUTES
