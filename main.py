@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2)
+# HISTORY ONLY (C1, C2) - FIXED LOGS
 # ============================================================
 
 import os
@@ -40,11 +40,11 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (Render + Sheets)
+# FIXED LOGGING (Render + Sheets) - FLUSH ADDED
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {level} | {msg}")
+    print(f"[{ts}] {level} | {msg}", flush=True)  # FLUSH FIXED
     try:
         requests.post(
             WEBAPP_URL,
@@ -56,7 +56,7 @@ def log(level, msg):
 
 def log_render(msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}")
+    print(f"[{ts}] {msg}", flush=True)  # FLUSH FIXED
 
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
@@ -69,7 +69,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY booted")
+log("SYSTEM", "main.py HISTORY-ONLY booted - FIXED")
 
 # ============================================================
 # SETTINGS
@@ -100,7 +100,7 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (LOCKED)
+# HISTORY FETCH (CANDLE_COUNT REMOVED)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
@@ -122,7 +122,7 @@ def fetch_two_history_candles(symbol, end_ts):
 
         if res.get("s") == "ok":
             candles = res.get("candles", [])
-            log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
+            # log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")  # REMOVED
             return candles
 
     except Exception as e:
@@ -157,9 +157,11 @@ def run_bias():
     return selected
 
 # ============================================================
-# CONTROLLER (HISTORY ONLY)
+# CONTROLLER (DEBUG + FLUSH)
 # ============================================================
 def controller():
+    print("[START] Controller THREAD running...", flush=True)  # DEBUG
+    
     if not BIAS_TIME_STR:
         log("ERROR", "BIAS_TIME missing")
         return
@@ -172,8 +174,11 @@ def controller():
 
     # STEP 1: Bias + Selection
     selected = run_bias()
+    print(f"[DEBUG] Selected {len(selected)} stocks", flush=True)  # DEBUG
+    
     if not selected:
-        return
+        print("[DEBUG] Forcing test stocks", flush=True)
+        selected = ["NSE:BPCL-EQ", "NSE:IOC-EQ"]  # TEST
 
     # STEP 2: History C1 + C2
     bias_ts = int(bias_dt.timestamp())
@@ -185,6 +190,7 @@ def controller():
     )
 
     for symbol in selected:
+        print(f"[DEBUG] Fetching {symbol}", flush=True)  # DEBUG
         candles = fetch_two_history_candles(symbol, ref_end)
         for ts, o, h, l, c, v in candles:
             log_render(
