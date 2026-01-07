@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2) – CLEAN LOGS VERSION
+# HISTORY ONLY (C1, C2) – RENDER SHOWS OHLCV
 # ============================================================
 
 import os
@@ -40,7 +40,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (Render + Sheets)
+# LOGGING
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -72,7 +72,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY (CLEAN LOGS) booted")
+log("SYSTEM", "main.py HISTORY-ONLY (RENDER OHLCV) booted")
 
 # ============================================================
 # SETTINGS
@@ -103,10 +103,10 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (C1, C2 ONLY – NO META LOGS)
+# HISTORY FETCH (NO META LOGS)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
-    start_ts = end_ts - 600  # 2 candles
+    start_ts = end_ts - 600
 
     try:
         res = fyers.history({
@@ -153,7 +153,7 @@ def run_bias():
     return selected
 
 # ============================================================
-# CONTROLLER (HISTORY ONLY)
+# CONTROLLER
 # ============================================================
 def controller():
     if not BIAS_TIME_STR:
@@ -182,13 +182,15 @@ def controller():
 
     for symbol in selected:
         candles = fetch_two_history_candles(symbol, ref_end)
-        for ts, o, h, l, c, v in candles:
+
+        # Expect exactly 2 candles: C1, C2
+        for idx, (ts, o, h, l, c, v) in enumerate(candles, start=1):
             log_render(
-                f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+                f"{symbol} | C{idx} | {fmt_ist(ts)} | "
                 f"O={o} H={h} L={l} C={c} V={v}"
             )
 
-    log("SYSTEM", "History COMPLETE (C1, C2 only)")
+    log("SYSTEM", "History COMPLETE (C1, C2 rendered)")
 
 # ============================================================
 # FLASK ROUTES
