@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2)
+# HISTORY ONLY (C1, C2) – CLEAN LOGS VERSION
 # ============================================================
 
 import os
@@ -48,7 +48,10 @@ def log(level, msg):
     try:
         requests.post(
             WEBAPP_URL,
-            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
+            json={
+                "action": "pushLog",
+                "payload": {"level": level, "message": msg}
+            },
             timeout=3
         )
     except Exception:
@@ -69,7 +72,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY booted")
+log("SYSTEM", "main.py HISTORY-ONLY (CLEAN LOGS) booted")
 
 # ============================================================
 # SETTINGS
@@ -89,7 +92,7 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # ============================================================
 # HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300
+CANDLE_INTERVAL = 300  # 5 min
 
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -100,15 +103,10 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (LOCKED)
+# HISTORY FETCH (C1, C2 ONLY – NO META LOGS)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
-    start_ts = end_ts - 600
-
-    log(
-        "HISTORY_FETCH",
-        f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST"
-    )
+    start_ts = end_ts - 600  # 2 candles
 
     try:
         res = fyers.history({
@@ -121,9 +119,7 @@ def fetch_two_history_candles(symbol, end_ts):
         })
 
         if res.get("s") == "ok":
-            candles = res.get("candles", [])
-            log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
-            return candles
+            return res.get("candles", [])
 
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
