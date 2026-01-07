@@ -1,8 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # HISTORY ONLY (C1, C2)
-# Render logs show OHLCV for ALL selected stocks
-# Logs sheet CLEAN
 # ============================================================
 
 import os
@@ -42,7 +40,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING
+# LOGGING (Render + Sheets)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -91,7 +89,7 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # ============================================================
 # HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300  # 5 minutes
+CANDLE_INTERVAL = 300
 
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -102,10 +100,15 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH – HARD GUARANTEE (ONLY C1, C2)
+# HISTORY FETCH (LOCKED)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
-    start_ts = end_ts - 600  # exactly 10 minutes
+    start_ts = end_ts - 600
+
+    log(
+        "HISTORY_FETCH",
+        f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST"
+    )
 
     try:
         res = fyers.history({
@@ -117,19 +120,15 @@ def fetch_two_history_candles(symbol, end_ts):
             "cont_flag": "1"
         })
 
-        if res.get("s") != "ok":
-            return []
-
-        candles = res.get("candles", [])
-
-        # HARD FIX: sort + take last 2 only
-        candles = sorted(candles, key=lambda x: x[0])[-2:]
-
-        return candles
+        if res.get("s") == "ok":
+            candles = res.get("candles", [])
+            log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")
+            return candles
 
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
-        return []
+
+    return []
 
 # ============================================================
 # SECTOR BIAS
@@ -158,7 +157,7 @@ def run_bias():
     return selected
 
 # ============================================================
-# CONTROLLER
+# CONTROLLER (HISTORY ONLY)
 # ============================================================
 def controller():
     if not BIAS_TIME_STR:
@@ -182,31 +181,18 @@ def controller():
 
     log(
         "SYSTEM",
-        f"History window = {fmt_ist(ref_end-600)} → {fmt_ist(ref_end)} IST"
+        f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST"
     )
 
     for symbol in selected:
         candles = fetch_two_history_candles(symbol, ref_end)
+        for ts, o, h, l, c, v in candles:
+            log_render(
+                f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+                f"O={o} H={h} L={l} C={c} V={v}"
+            )
 
-        if len(candles) != 2:
-            log_render(f"{symbol} | INVALID HISTORY COUNT = {len(candles)}")
-            continue
-
-        # C1
-        ts, o, h, l, c, v = candles[0]
-        log_render(
-            f"{symbol} | C1 | {fmt_ist(ts)} | "
-            f"O={o} H={h} L={l} C={c} V={v}"
-        )
-
-        # C2
-        ts, o, h, l, c, v = candles[1]
-        log_render(
-            f"{symbol} | C2 | {fmt_ist(ts)} | "
-            f"O={o} H={h} L={l} C={c} V={v}"
-        )
-
-    log("SYSTEM", "History COMPLETE (C1, C2 rendered in RENDER logs)")
+    log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
 # ============================================================
 # FLASK ROUTES
