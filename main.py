@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2) - FIXED LOGS
+# HISTORY ONLY (C1, C2) - CLEAN RENDER LOGS
 # ============================================================
 
 import os
@@ -44,7 +44,7 @@ fyers = fyersModel.FyersModel(
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {level} | {msg}", flush=True)  # FLUSH FIXED
+    print(f"[{ts}] {level} | {msg}", flush=True)
     try:
         requests.post(
             WEBAPP_URL,
@@ -56,7 +56,7 @@ def log(level, msg):
 
 def log_render(msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)  # FLUSH FIXED
+    print(f"[{ts}] {msg}", flush=True)
 
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
@@ -69,7 +69,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY booted - FIXED")
+log("SYSTEM", "main.py HISTORY-ONLY booted - CLEAN")
 
 # ============================================================
 # SETTINGS
@@ -122,7 +122,6 @@ def fetch_two_history_candles(symbol, end_ts):
 
         if res.get("s") == "ok":
             candles = res.get("candles", [])
-            # log("HISTORY_RESULT", f"{symbol} | candles_count={len(candles)}")  # REMOVED
             return candles
 
     except Exception as e:
@@ -157,10 +156,10 @@ def run_bias():
     return selected
 
 # ============================================================
-# CONTROLLER (DEBUG + FLUSH)
+# CONTROLLER - CLEAN RENDER (ONLY C1+C2)
 # ============================================================
 def controller():
-    print("[START] Controller THREAD running...", flush=True)  # DEBUG
+    print("[START] Controller running", flush=True)
     
     if not BIAS_TIME_STR:
         log("ERROR", "BIAS_TIME missing")
@@ -172,31 +171,27 @@ def controller():
     while datetime.now(UTC) < bias_dt:
         time.sleep(1)
 
-    # STEP 1: Bias + Selection
     selected = run_bias()
-    print(f"[DEBUG] Selected {len(selected)} stocks", flush=True)  # DEBUG
+    print(f"[INFO] Processing {len(selected)} stocks", flush=True)
     
     if not selected:
-        print("[DEBUG] Forcing test stocks", flush=True)
-        selected = ["NSE:BPCL-EQ", "NSE:IOC-EQ"]  # TEST
+        print("[INFO] Forcing test stocks", flush=True)
+        selected = ["NSE:BPCL-EQ", "NSE:IOC-EQ"]
 
-    # STEP 2: History C1 + C2
     bias_ts = int(bias_dt.timestamp())
     ref_end = floor_5min(bias_ts)
 
-    log(
-        "SYSTEM",
-        f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST"
-    )
+    log("SYSTEM", f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST")
 
+    # CLEAN LOOP: फक्त C1+C2 candles Render logs मध्ये
     for symbol in selected:
-        print(f"[DEBUG] Fetching {symbol}", flush=True)  # DEBUG
         candles = fetch_two_history_candles(symbol, ref_end)
-        for ts, o, h, l, c, v in candles:
-            log_render(
-                f"HISTORY | {symbol} | {fmt_ist(ts)} | "
-                f"O={o} H={h} L={l} C={c} V={v}"
-            )
+        for i, (ts, o, h, l, c, v) in enumerate(candles):
+            if i < 2:  # केवळ शेवटचे २ candles (C1, C2)
+                log_render(
+                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
+                )
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
