@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2) - CLEAN RENDER LOGS
+# HISTORY ONLY (C1, C2) - PERFECT CLEAN
 # ============================================================
 
 import os
@@ -40,7 +40,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# FIXED LOGGING (Render + Sheets) - FLUSH ADDED
+# FIXED LOGGING (Render + Sheets)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -69,7 +69,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY booted - CLEAN")
+log("SYSTEM", "main.py HISTORY-ONLY PERFECT")
 
 # ============================================================
 # SETTINGS
@@ -100,15 +100,12 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH (CANDLE_COUNT REMOVED)
+# HISTORY FETCH - NO FETCH LOG IN RENDER
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
 
-    log(
-        "HISTORY_FETCH",
-        f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST"
-    )
+    # log("HISTORY_FETCH", f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST")  # REMOVED FOR CLEAN RENDER
 
     try:
         res = fyers.history({
@@ -156,7 +153,7 @@ def run_bias():
     return selected
 
 # ============================================================
-# CONTROLLER - CLEAN RENDER (ONLY C1+C2)
+# CONTROLLER - ULTRA CLEAN (2 LINES PER STOCK)
 # ============================================================
 def controller():
     print("[START] Controller running", flush=True)
@@ -183,15 +180,11 @@ def controller():
 
     log("SYSTEM", f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST")
 
-    # CLEAN LOOP: फक्त C1+C2 candles Render logs मध्ये
     for symbol in selected:
         candles = fetch_two_history_candles(symbol, ref_end)
         for i, (ts, o, h, l, c, v) in enumerate(candles):
-            if i < 2:  # केवळ शेवटचे २ candles (C1, C2)
-                log_render(
-                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
-                    f"O={o} H={h} L={l} C={c} V={v}"
-                )
+            if i < 2:
+                log_render(f"HISTORY | {symbol} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
