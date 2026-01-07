@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – main.py
-# HISTORY ONLY (C1, C2) - PERFECT CLEAN
+# RajanTradeAutomation – FINAL main.py
+# HISTORY (C1,C2) + EARLY WS + LIVE (C3+)
 # ============================================================
 
 import os
@@ -10,7 +10,12 @@ import requests
 from datetime import datetime
 import pytz
 from flask import Flask, jsonify, request
+
 from fyers_apiv3 import fyersModel
+from fyers_apiv3.FyersWebsocket import data_ws
+
+from sector_mapping import SECTOR_MAP
+from sector_engine import run_sector_bias
 
 # ============================================================
 # TIMEZONES
@@ -40,7 +45,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# FIXED LOGGING (Render + Sheets)
+# LOGGING (EXACT SAME AS HISTORY-ONLY CODE)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -69,7 +74,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py HISTORY-ONLY PERFECT")
+log("SYSTEM", "main.py FINAL (HISTORY + EARLY WS + LIVE)")
 
 # ============================================================
 # SETTINGS
@@ -100,13 +105,10 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH - NO FETCH LOG IN RENDER
+# HISTORY FETCH (UNCHANGED)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
-
-    # log("HISTORY_FETCH", f"{symbol} | {fmt_ist(start_ts)}→{fmt_ist(end_ts)} IST")  # REMOVED FOR CLEAN RENDER
-
     try:
         res = fyers.history({
             "symbol": symbol,
@@ -116,48 +118,112 @@ def fetch_two_history_candles(symbol, end_ts):
             "range_to": int(end_ts - 1),
             "cont_flag": "1"
         })
-
         if res.get("s") == "ok":
-            candles = res.get("candles", [])
-            return candles
-
+            return res.get("candles", [])
     except Exception as e:
         log("ERROR", f"History exception {symbol}: {e}")
-
     return []
 
 # ============================================================
-# SECTOR BIAS
+# WS + LIVE CANDLE ENGINE
 # ============================================================
-def run_bias():
-    from sector_engine import run_sector_bias
+ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
-    log("BIAS", "Sector bias check started")
-    result = run_sector_bias()
+candles = {}
+last_cum_vol = {}
+BT_FLOOR_TS = None
 
-    strong_sectors = result.get("strong_sectors", [])
-    selected = result.get("selected_stocks", [])
+def candle_start(ts):
+    return ts - (ts % CANDLE_INTERVAL)
 
-    if not strong_sectors:
-        log("SYSTEM", "No strong sector – NO TRADE DAY")
-        return []
+def close_live_candle(symbol, c):
+    # 🔒 TIMESTAMP GUARD (CORE FIX)
+    if c["start"] < BT_FLOOR_TS:
+        return
 
-    for s in strong_sectors:
-        log(
-            "SECTOR_BIAS",
-            f"{s['sector']} | {s['bias']} | "
-            f"Advance={s['up_pct']}% | Decline={s['down_pct']}%"
-        )
+    prev = last_cum_vol.get(symbol, c["cum_vol"])
+    vol = c["cum_vol"] - prev
+    last_cum_vol[symbol] = c["cum_vol"]
 
-    log("STOCKS", f"Selected={len(selected)}")
-    return selected
+    # 🔒 SAME FORMAT AS HISTORY LOGS
+    log_render(
+        f"LIVE | {symbol} | {fmt_ist(c['start'])} | "
+        f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
+    )
+
+def update_candle(msg):
+    if BT_FLOOR_TS is None:
+        return
+
+    symbol = msg.get("symbol")
+    ltp = msg.get("ltp")
+    vol = msg.get("vol_traded_today")
+    ts = msg.get("exch_feed_time")
+
+    if not symbol or ltp is None or vol is None or ts is None:
+        return
+
+    start = candle_start(ts)
+    c = candles.get(symbol)
+
+    if c is None or c["start"] != start:
+        if c:
+            close_live_candle(symbol, c)
+        candles[symbol] = {
+            "start": start,
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": vol
+        }
+        return
+
+    c["high"] = max(c["high"], ltp)
+    c["low"] = min(c["low"], ltp)
+    c["close"] = ltp
+    c["cum_vol"] = vol
 
 # ============================================================
-# CONTROLLER - ULTRA CLEAN (2 LINES PER STOCK)
+# WS CALLBACKS
+# ============================================================
+def on_message(msg):
+    update_candle(msg)
+
+def on_error(msg):
+    print("❌ WS ERROR", flush=True)
+
+def on_close(msg):
+    print("🔌 WS CLOSED", flush=True)
+
+def on_connect():
+    print("🔗 WS CONNECTED", flush=True)
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+    print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
+
+# ============================================================
+# START WS
+# ============================================================
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+# ============================================================
+# CONTROLLER (AUTHORITATIVE FLOW)
 # ============================================================
 def controller():
-    print("[START] Controller running", flush=True)
-    
+    global BT_FLOOR_TS
+
     if not BIAS_TIME_STR:
         log("ERROR", "BIAS_TIME missing")
         return
@@ -168,23 +234,53 @@ def controller():
     while datetime.now(UTC) < bias_dt:
         time.sleep(1)
 
-    selected = run_bias()
-    print(f"[INFO] Processing {len(selected)} stocks", flush=True)
-    
+    BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
+
+    # -------- BIAS + SELECTION --------
+    log("BIAS", "Sector bias check started")
+    result = run_sector_bias()
+
+    selected = result.get("selected_stocks", [])
     if not selected:
-        print("[INFO] Forcing test stocks", flush=True)
-        selected = ["NSE:BPCL-EQ", "NSE:IOC-EQ"]
+        log("SYSTEM", "No strong sector – NO TRADE DAY")
+        return
 
-    bias_ts = int(bias_dt.timestamp())
-    ref_end = floor_5min(bias_ts)
+    for s in result.get("strong_sectors", []):
+        log(
+            "SECTOR_BIAS",
+            f"{s['sector']} | {s['bias']} | "
+            f"Advance={s['up_pct']}% | Decline={s['down_pct']}%"
+        )
 
-    log("SYSTEM", f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST")
+    log("STOCKS", f"Selected={len(selected)}")
+
+    # -------- UNSUBSCRIBE NON-SELECTED --------
+    non_selected = set(ALL_SYMBOLS) - set(selected)
+    try:
+        fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    except Exception:
+        pass
+
+    for s in non_selected:
+        candles.pop(s, None)
+        last_cum_vol.pop(s, None)
+
+    log("SYSTEM", f"Unsubscribed non-selected stocks = {len(non_selected)}")
+
+    # -------- HISTORY C1, C2 --------
+    log(
+        "SYSTEM",
+        f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
+    )
 
     for symbol in selected:
-        candles = fetch_two_history_candles(symbol, ref_end)
-        for i, (ts, o, h, l, c, v) in enumerate(candles):
+        candles_hist = fetch_two_history_candles(symbol, BT_FLOOR_TS)
+        for i, (ts, o, h, l, c, v) in enumerate(candles_hist):
             if i < 2:
-                log_render(f"HISTORY | {symbol} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
+                log_render(
+                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
+                )
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
