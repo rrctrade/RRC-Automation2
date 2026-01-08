@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# HISTORY (C1,C2) + EARLY WS + LIVE (SAFE UNSUBSCRIBE)
+# BIAS-TIME ALIGNED LIVE3 / LIVE4 / LIVE5...
 # ============================================================
 
 import os
@@ -75,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (HISTORY + EARLY WS + LIVE SAFE)")
+log("SYSTEM", "main.py FINAL (BIAS-TIME ALIGNED LIVE3+)")
 
 # ============================================================
 # SETTINGS
@@ -123,52 +123,27 @@ candles = {}
 last_cum_vol = {}
 BT_FLOOR_TS = None
 
-FIRST_LIVE_SEEN = set()
-SECOND_LIVE_SEEN = set()
-FIRST_LIVE_CLOSED = False
-UNSUB_DONE = False
-SELECTED_STOCKS = []
-
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-def close_live_candle(symbol, c):
-    global FIRST_LIVE_CLOSED, UNSUB_DONE
+def live_label(start_ts):
+    offset = (start_ts - BT_FLOOR_TS) // CANDLE_INTERVAL
+    return f"LIVE{offset + 3}"
 
+def close_live_candle(symbol, c):
     if c["start"] < BT_FLOOR_TS:
-        return
+        return  # history zone
 
     prev = last_cum_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
-    label = "LIVE"
-    if symbol not in FIRST_LIVE_SEEN:
-        label = "LIVE C"
-        FIRST_LIVE_SEEN.add(symbol)
-        FIRST_LIVE_CLOSED = True   # 🔥 key line
-    elif symbol not in SECOND_LIVE_SEEN:
-        label = "LIVE C3"
-        SECOND_LIVE_SEEN.add(symbol)
+    label = live_label(c["start"])
 
     log_render(
         f"{label} | {symbol} | {fmt_ist(c['start'])} | "
         f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
     )
-
-    # 🔥 SAFE UNSUBSCRIBE (AFTER FIRST LIVE CLOSE)
-    if FIRST_LIVE_CLOSED and not UNSUB_DONE:
-        non_selected = set(ALL_SYMBOLS) - set(SELECTED_STOCKS)
-        try:
-            fyers_ws.unsubscribe(
-                symbols=list(non_selected),
-                data_type="SymbolUpdate"
-            )
-        except Exception:
-            pass
-
-        UNSUB_DONE = True
-        log("SYSTEM", f"Unsubscribed non-selected stocks = {len(non_selected)}")
 
 def update_candle(msg):
     if BT_FLOOR_TS is None:
@@ -204,7 +179,7 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ============================================================
-# WS CALLBACKS
+# WS
 # ============================================================
 def on_message(msg):
     update_candle(msg)
@@ -230,7 +205,7 @@ threading.Thread(target=start_ws, daemon=True).start()
 # CONTROLLER
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, SELECTED_STOCKS
+    global BT_FLOOR_TS
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
@@ -242,15 +217,21 @@ def controller():
 
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
-    SELECTED_STOCKS = res.get("selected_stocks", [])
-    log("STOCKS", f"Selected={len(SELECTED_STOCKS)}")
+    selected = res.get("selected_stocks", [])
+    log("STOCKS", f"Selected={len(selected)}")
+
+    non_selected = set(ALL_SYMBOLS) - set(selected)
+    try:
+        fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    except Exception:
+        pass
 
     log(
         "SYSTEM",
         f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
     )
 
-    for s in SELECTED_STOCKS:
+    for s in selected:
         for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
             if i < 2:
                 log_render(
