@@ -1,5 +1,5 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py
+# RajanTradeAutomation – FINAL main.py (STABLE + DEPLOY READY)
 # HISTORY (C1,C2) + EARLY WS + LIVE (C3+)
 # ============================================================
 
@@ -22,6 +22,7 @@ from sector_engine import run_sector_bias
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
+CANDLE_INTERVAL = 300
 
 # ============================================================
 # ENV
@@ -45,7 +46,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (EXACT SAME AS HISTORY-ONLY CODE)
+# LOGGING (EXACT SAME AS STABLE HISTORY CODE)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -67,7 +68,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 # ============================================================
-# CLEAR LOGS ON DEPLOY
+# CLEAR LOGS ON DEPLOY (SAME AS STABLE)
 # ============================================================
 try:
     requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
@@ -94,8 +95,6 @@ log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 # ============================================================
 # HELPERS
 # ============================================================
-CANDLE_INTERVAL = 300
-
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
@@ -137,15 +136,13 @@ def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_live_candle(symbol, c):
-    # 🔒 TIMESTAMP GUARD (CORE FIX)
     if c["start"] < BT_FLOOR_TS:
-        return
+        return  # IGNORE PRE-BIAS ZONE
 
     prev = last_cum_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
-    # 🔒 SAME FORMAT AS HISTORY LOGS
     log_render(
         f"LIVE | {symbol} | {fmt_ist(c['start'])} | "
         f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
@@ -201,9 +198,6 @@ def on_connect():
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
     print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
 
-# ============================================================
-# START WS
-# ============================================================
 def start_ws():
     global fyers_ws
     fyers_ws = data_ws.FyersDataSocket(
@@ -219,7 +213,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# CONTROLLER (AUTHORITATIVE FLOW)
+# CONTROLLER
 # ============================================================
 def controller():
     global BT_FLOOR_TS
@@ -236,38 +230,18 @@ def controller():
 
     BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
 
-    # -------- BIAS + SELECTION --------
     log("BIAS", "Sector bias check started")
     result = run_sector_bias()
 
     selected = result.get("selected_stocks", [])
-    if not selected:
-        log("SYSTEM", "No strong sector – NO TRADE DAY")
-        return
-
-    for s in result.get("strong_sectors", []):
-        log(
-            "SECTOR_BIAS",
-            f"{s['sector']} | {s['bias']} | "
-            f"Advance={s['up_pct']}% | Decline={s['down_pct']}%"
-        )
-
     log("STOCKS", f"Selected={len(selected)}")
 
-    # -------- UNSUBSCRIBE NON-SELECTED --------
     non_selected = set(ALL_SYMBOLS) - set(selected)
     try:
         fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
     except Exception:
         pass
 
-    for s in non_selected:
-        candles.pop(s, None)
-        last_cum_vol.pop(s, None)
-
-    log("SYSTEM", f"Unsubscribed non-selected stocks = {len(non_selected)}")
-
-    # -------- HISTORY C1, C2 --------
     log(
         "SYSTEM",
         f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
@@ -285,11 +259,15 @@ def controller():
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
 # ============================================================
-# FLASK ROUTES
+# FLASK ROUTES (REQUIRED)
 # ============================================================
 @app.route("/")
 def health():
     return jsonify({"status": "ok"})
+
+@app.route("/ping")
+def ping():
+    return jsonify({"status": "alive"})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
