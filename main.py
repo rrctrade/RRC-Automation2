@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (STABLE + DEPLOY READY)
-# HISTORY (C1,C2) + EARLY WS + LIVE (C3+)
+# RajanTradeAutomation – main.py
+# HISTORY (C1, C2) + EARLY WS + LIVE (with LIVE C / LIVE C3 labels)
 # ============================================================
 
 import os
@@ -46,7 +46,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (EXACT SAME AS STABLE HISTORY CODE)
+# LOGGING (UNCHANGED – SAME AS STABLE HISTORY CODE)
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -68,7 +68,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 # ============================================================
-# CLEAR LOGS ON DEPLOY (SAME AS STABLE)
+# CLEAR LOGS ON DEPLOY
 # ============================================================
 try:
     requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
@@ -132,19 +132,32 @@ candles = {}
 last_cum_vol = {}
 BT_FLOOR_TS = None
 
+# 🔹 NEW: LIVE LABEL STATE (ONLY FOR DEBUG)
+FIRST_LIVE_SEEN = set()
+SECOND_LIVE_SEEN = set()
+
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_live_candle(symbol, c):
     if c["start"] < BT_FLOOR_TS:
-        return  # IGNORE PRE-BIAS ZONE
+        return  # ignore pre-bias zone candles
 
     prev = last_cum_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
+    # 🔹 LABEL LOGIC (AS YOU ASKED)
+    label = "LIVE"
+    if symbol not in FIRST_LIVE_SEEN:
+        label = "LIVE C"
+        FIRST_LIVE_SEEN.add(symbol)
+    elif symbol not in SECOND_LIVE_SEEN:
+        label = "LIVE C3"
+        SECOND_LIVE_SEEN.add(symbol)
+
     log_render(
-        f"LIVE | {symbol} | {fmt_ist(c['start'])} | "
+        f"{label} | {symbol} | {fmt_ist(c['start'])} | "
         f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
     )
 
