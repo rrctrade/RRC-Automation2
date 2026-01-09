@@ -1,193 +1,222 @@
 # ============================================================
-# main.py
-# FINAL LOCKED VERSION
-# History anchored to BIAS TIME, Live numbered deterministically
+# RajanTradeAutomation – main.py (FINAL STABLE)
 # ============================================================
 
-import os, time, threading, requests
+import os
+import time
+import threading
 from datetime import datetime
-import pytz
-from flask import Flask, jsonify
-from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws
+from flask import Flask, jsonify, request
 
-# ---------------- TIME ----------------
-IST = pytz.timezone("Asia/Kolkata")
-UTC = pytz.utc
-INTERVAL = 300
+# ------------------------------------------------------------
+# BASIC LOG
+# ------------------------------------------------------------
+print("🚀 main.py STARTED")
 
-def now_ist():
-    return datetime.now(IST)
-
-def floor_5m(ts):
-    return ts - (ts % INTERVAL)
-
-def ist_str(ts):
-    return datetime.fromtimestamp(ts, UTC).astimezone(IST).strftime("%H:%M:%S")
-
-# ---------------- ENV ----------------
+# ------------------------------------------------------------
+# ENV
+# ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL")
 
-# ---------------- APP ----------------
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
+    raise Exception("❌ FYERS ENV variables missing")
+
+# ------------------------------------------------------------
+# FLASK
+# ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
     return jsonify({"status": "ok"})
 
+@app.route("/callback")
+def fyers_callback():
+    return jsonify({"status": "callback_received"})
+
 @app.route("/fyers-redirect")
 def fyers_redirect():
-    print("SYSTEM | FYERS redirect | code=200", flush=True)
-    return jsonify({"status": "ok"})
+    auth_code = request.args.get("auth_code") or request.args.get("code")
+    return jsonify({"status": "redirect_received", "auth_code": auth_code})
 
-# ---------------- LOG ----------------
-def log(msg):
-    print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
-    try:
-        requests.post(WEBAPP_URL, json={
-            "action": "pushLog",
-            "payload": {"level": "INFO", "message": msg}
-        }, timeout=2)
-    except:
-        pass
+# ------------------------------------------------------------
+# FYERS WS
+# ------------------------------------------------------------
+from fyers_apiv3.FyersWebsocket import data_ws
 
-# ---------------- SETTINGS ----------------
-def get_settings():
-    try:
-        r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5)
-        return r.json().get("settings", {})
-    except:
-        return {}
+# ------------------------------------------------------------
+# UNIVERSE
+# ------------------------------------------------------------
+from sector_mapping import SECTOR_MAP
 
-SETTINGS = get_settings()
-BIAS_TIME = SETTINGS.get("BIAS_TIME")
+ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
+print(f"📦 Total symbols to subscribe: {len(ALL_SYMBOLS)}")
 
-bias_ist = IST.localize(
-    datetime.combine(now_ist().date(),
-    datetime.strptime(BIAS_TIME, "%H:%M:%S").time())
-)
-BIAS_TS = int(bias_ist.astimezone(UTC).timestamp())
-BIAS_FLOOR = floor_5m(BIAS_TS)
-
-log(f"SETTINGS | BIAS_TIME={BIAS_TIME}")
-
-# ---------------- FYERS REST ----------------
-fyers = fyersModel.FyersModel(
-    client_id=FYERS_CLIENT_ID,
-    token=FYERS_ACCESS_TOKEN,
-    log_path=""
-)
-
-# ---------------- STATE ----------------
+# ------------------------------------------------------------
+# CANDLE ENGINE
+# ------------------------------------------------------------
+CANDLE_INTERVAL = 300
 candles = {}
 last_cum_vol = {}
-history_c2_vol = {}
-live_index = {}
 
-# ---------------- HISTORY ----------------
-def fetch_history(symbol):
-    res = fyers.history({
-        "symbol": symbol,
-        "resolution": "5",
-        "date_format": "0",
-        "range_from": BIAS_FLOOR - 600,
-        "range_to": BIAS_FLOOR - 1,
-        "cont_flag": "1"
-    })
-    return res.get("candles", []) if res.get("s") == "ok" else []
+LIVE_COUNT = 0  # 🔥 LIVE C / LIVE3 counter
 
-# ---------------- CANDLE ENGINE ----------------
+def candle_start(ts):
+    return ts - (ts % CANDLE_INTERVAL)
+
 def close_candle(symbol, c):
-    start = c["start"]
+    global LIVE_COUNT
 
-    if start < BIAS_FLOOR:
-        return  # ignore all pre-bias live candles
-
-    if symbol not in live_index:
-        live_index[symbol] = 3
-
-    idx = live_index[symbol]
-    vol = c["cum_vol"] - last_cum_vol.get(symbol, c["cum_vol"])
+    prev = last_cum_vol.get(symbol, c["cum_vol"])
+    vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
-    log(
-        f"LIVE{idx} | {symbol} | {ist_str(start)} | "
-        f"O={c['o']} H={c['h']} L={c['l']} C={c['c']} V={vol}"
+    if LIVE_COUNT == 0:
+        label = "LIVE C"
+    elif LIVE_COUNT == 1:
+        label = "LIVE3"
+    else:
+        label = "LIVE"
+
+    print(
+        f"[{datetime.now().strftime('%H:%M:%S')}] {label} | {symbol} | "
+        f"{time.strftime('%H:%M:%S', time.localtime(c['start']))} | "
+        f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
     )
 
-    live_index[symbol] += 1
+    LIVE_COUNT += 1
 
-def on_tick(msg):
+def update_candle(msg):
+    # 🛡️ GUARD – ignore non-tick packets
+    if not isinstance(msg, dict):
+        return
+    if "symbol" not in msg or "ltp" not in msg:
+        return
+
     symbol = msg["symbol"]
-    ts = msg["exch_feed_time"]
-    ltp = msg["ltp"]
-    cum = msg["vol_traded_today"]
+    ltp = msg.get("ltp")
+    vol = msg.get("vol_traded_today")
+    ts = msg.get("exch_feed_time")
 
-    start = floor_5m(ts)
+    if ltp is None or vol is None or ts is None:
+        return
+
+    start = candle_start(ts)
     c = candles.get(symbol)
 
-    if not c or c["start"] != start:
+    if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
         candles[symbol] = {
             "start": start,
-            "o": ltp, "h": ltp, "l": ltp, "c": ltp,
-            "cum_vol": cum
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": vol
         }
         return
 
-    c["h"] = max(c["h"], ltp)
-    c["l"] = min(c["l"], ltp)
-    c["c"] = ltp
-    c["cum_vol"] = cum
+    c["high"] = max(c["high"], ltp)
+    c["low"] = min(c["low"], ltp)
+    c["close"] = ltp
+    c["cum_vol"] = vol
 
-# ---------------- WS ----------------
-from sector_mapping import SECTOR_MAP
+# ------------------------------------------------------------
+# SELECTION STATE
+# ------------------------------------------------------------
+SELECTION_DONE = False
+UNSUB_DONE = False
+SELECTED_STOCKS = set()
+LOCK = threading.Lock()
+
+def on_sector_selection(result):
+    global SELECTION_DONE, SELECTED_STOCKS
+    SELECTED_STOCKS = set(result.get("selected_stocks", []))
+    SELECTION_DONE = True
+    print(f"✅ STOCKS | Selected={len(SELECTED_STOCKS)}")
+
+def unsubscribe_non_selected():
+    global UNSUB_DONE
+
+    if not SELECTION_DONE or UNSUB_DONE:
+        return
+
+    with LOCK:
+        if UNSUB_DONE:
+            return
+
+        remove = set(candles.keys()) - SELECTED_STOCKS
+        if remove:
+            try:
+                fyers_ws.unsubscribe(list(remove), data_type="SymbolUpdate")
+            except Exception:
+                pass
+
+            for s in remove:
+                candles.pop(s, None)
+                last_cum_vol.pop(s, None)
+
+            print(f"✂️ SYSTEM | Unsubscribed non-selected stocks = {len(remove)}")
+
+        UNSUB_DONE = True
+
+# ------------------------------------------------------------
+# WS CALLBACKS
+# ------------------------------------------------------------
+def on_message(msg):
+    update_candle(msg)
+    unsubscribe_non_selected()
 
 def on_connect():
-    symbols = sorted({s for v in SECTOR_MAP.values() for s in v})
-    fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
-    log(f"Subscribed ALL stocks ({len(symbols)})")
+    print("🔗 WS CONNECTED")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+    print(f"📡 Subscribed ALL stocks ({len(ALL_SYMBOLS)})")
 
-fyers_ws = data_ws.FyersDataSocket(
-    access_token=FYERS_ACCESS_TOKEN,
-    on_connect=on_connect,
-    on_message=on_tick,
-    reconnect=True
-)
+def on_error(msg):
+    print("❌ WS ERROR", msg)
 
-threading.Thread(target=fyers_ws.connect, daemon=True).start()
+def on_close(msg):
+    print("🔌 WS CLOSED")
 
-# ---------------- CONTROLLER ----------------
+# ------------------------------------------------------------
+# START WS
+# ------------------------------------------------------------
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+# ------------------------------------------------------------
+# SECTOR ENGINE
+# ------------------------------------------------------------
 from sector_engine import run_sector_bias
 
-def controller():
-    log(f"Waiting for BIAS TIME {BIAS_TIME}")
-    while int(time.time()) < BIAS_TS:
+def sector_runner():
+    while True:
+        now = datetime.now().strftime("%H:%M:%S")
+        if now >= "09:25:05" and not SELECTION_DONE:
+            print("⏱️ BIAS | Sector bias check started")
+            result = run_sector_bias()
+            on_sector_selection(result)
+            break
         time.sleep(1)
 
-    result = run_sector_bias()
-    selected = result["selected_stocks"]
-    log(f"STOCKS | Selected={len(selected)}")
+threading.Thread(target=sector_runner, daemon=True).start()
 
-    for s in selected:
-        hist = fetch_history(s)
-        if len(hist) >= 2:
-            c2 = hist[-1]
-            history_c2_vol[s] = c2[5]
-            last_cum_vol[s] = c2[5]
-            for ts,o,h,l,c,v in hist[:2]:
-                log(
-                    f"HISTORY | {s} | {ist_str(ts)} | "
-                    f"O={o} H={h} L={l} C={c} V={v}"
-                )
-
-    log("SYSTEM | History COMPLETE (C1, C2 only)")
-
-threading.Thread(target=controller, daemon=True).start()
-
-# ---------------- START ----------------
+# ------------------------------------------------------------
+# START FLASK
+# ------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
