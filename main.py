@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# BIAS-TIME ALIGNED LIVE3 / LIVE4 / LIVE5...
+# LIVE3 volume FIXED (FYERS-style baseline seeding)
 # ============================================================
 
 import os
@@ -46,7 +46,7 @@ fyers = fyersModel.FyersModel(
 )
 
 # ============================================================
-# LOGGING (UNCHANGED)
+# LOGGING
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
@@ -75,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (BIAS-TIME ALIGNED LIVE3+)")
+log("SYSTEM", "main.py FINAL (LIVE3 volume FIXED – FYERS baseline)")
 
 # ============================================================
 # SETTINGS
@@ -100,7 +100,7 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY
+# HISTORY (unchanged)
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
@@ -120,7 +120,7 @@ def fetch_two_history_candles(symbol, end_ts):
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 candles = {}
-last_cum_vol = {}
+last_cum_vol = {}   # 🔥 baseline seeded at candle start
 BT_FLOOR_TS = None
 
 def candle_start(ts):
@@ -132,9 +132,12 @@ def live_label(start_ts):
 
 def close_live_candle(symbol, c):
     if c["start"] < BT_FLOOR_TS:
-        return  # history zone
+        return
 
-    prev = last_cum_vol.get(symbol, c["cum_vol"])
+    prev = last_cum_vol.get(symbol)
+    if prev is None:
+        prev = c["cum_vol"]  # safety
+
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
@@ -142,7 +145,8 @@ def close_live_candle(symbol, c):
 
     log_render(
         f"{label} | {symbol} | {fmt_ist(c['start'])} | "
-        f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
+        f"O={c['open']} H={c['high']} L={c['low']} "
+        f"C={c['close']} V={vol}"
     )
 
 def update_candle(msg):
@@ -163,6 +167,12 @@ def update_candle(msg):
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
+
+        # ✅ CORE FIX:
+        # candle सुरू होताना FYERS देतो तोच cumulative volume baseline
+        if symbol not in last_cum_vol:
+            last_cum_vol[symbol] = vol
+
         candles[symbol] = {
             "start": start,
             "open": ltp,
