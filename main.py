@@ -1,47 +1,36 @@
 # ============================================================
-# RajanTradeAutomation – main.py
-# FINAL : HISTORY (C1,C2) + LIVE (LIVE3+) with FIXED VOLUME
+# main.py
+# FINAL LOCKED VERSION
+# History anchored to BIAS TIME, Live numbered deterministically
 # ============================================================
 
-import os
-import time
-import threading
-import requests
+import os, time, threading, requests
 from datetime import datetime
 import pytz
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
-# ============================================================
-# TIME
-# ============================================================
+# ---------------- TIME ----------------
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
-CANDLE_INTERVAL = 300
+INTERVAL = 300
 
 def now_ist():
     return datetime.now(IST)
 
-def floor_5min(ts):
-    return ts - (ts % CANDLE_INTERVAL)
+def floor_5m(ts):
+    return ts - (ts % INTERVAL)
 
-def fmt_ist(ts):
-    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
+def ist_str(ts):
+    return datetime.fromtimestamp(ts, UTC).astimezone(IST).strftime("%H:%M:%S")
 
-# ============================================================
-# ENV
-# ============================================================
+# ---------------- ENV ----------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL")
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
-    raise RuntimeError("Missing ENV variables")
-
-# ============================================================
-# APP
-# ============================================================
+# ---------------- APP ----------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -50,222 +39,155 @@ def health():
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
-    code = request.args.get("code") or request.args.get("auth_code")
-    log("SYSTEM", f"FYERS redirect | code=200")
+    print("SYSTEM | FYERS redirect | code=200", flush=True)
     return jsonify({"status": "ok"})
 
-# ============================================================
-# FYERS REST
-# ============================================================
+# ---------------- LOG ----------------
+def log(msg):
+    print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
+    try:
+        requests.post(WEBAPP_URL, json={
+            "action": "pushLog",
+            "payload": {"level": "INFO", "message": msg}
+        }, timeout=2)
+    except:
+        pass
+
+# ---------------- SETTINGS ----------------
+def get_settings():
+    try:
+        r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5)
+        return r.json().get("settings", {})
+    except:
+        return {}
+
+SETTINGS = get_settings()
+BIAS_TIME = SETTINGS.get("BIAS_TIME")
+
+bias_ist = IST.localize(
+    datetime.combine(now_ist().date(),
+    datetime.strptime(BIAS_TIME, "%H:%M:%S").time())
+)
+BIAS_TS = int(bias_ist.astimezone(UTC).timestamp())
+BIAS_FLOOR = floor_5m(BIAS_TS)
+
+log(f"SETTINGS | BIAS_TIME={BIAS_TIME}")
+
+# ---------------- FYERS REST ----------------
 fyers = fyersModel.FyersModel(
     client_id=FYERS_CLIENT_ID,
     token=FYERS_ACCESS_TOKEN,
     log_path=""
 )
 
-# ============================================================
-# LOGGING (LOCKED FORMAT)
-# ============================================================
-def log(level, msg):
-    ts = now_ist().strftime("%H:%M:%S")
-    print(f"[{ts}] {level} | {msg}", flush=True)
-    try:
-        requests.post(
-            WEBAPP_URL,
-            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
-            timeout=3
-        )
-    except Exception:
-        pass
+# ---------------- STATE ----------------
+candles = {}
+last_cum_vol = {}
+history_c2_vol = {}
+live_index = {}
 
-def log_render(msg):
-    ts = now_ist().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-# ============================================================
-# CLEAR LOGS ON DEPLOY
-# ============================================================
-try:
-    requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
-except Exception:
-    pass
-
-log("SYSTEM", "main.py FINAL (HISTORY + LIVE3 FIXED)")
-
-# ============================================================
-# SETTINGS
-# ============================================================
-def get_settings():
-    try:
-        r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5)
-        return r.json().get("settings", {})
-    except Exception:
-        return {}
-
-SETTINGS = get_settings()
-BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
-log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
-
-def parse_bias_time_utc(tstr):
-    t = datetime.strptime(tstr, "%H:%M:%S").time()
-    ist_dt = IST.localize(datetime.combine(now_ist().date(), t))
-    return ist_dt.astimezone(UTC)
-
-# ============================================================
-# HISTORY FETCH (C1,C2)
-# ============================================================
-def fetch_two_history(symbol, end_ts):
-    start_ts = end_ts - 600
+# ---------------- HISTORY ----------------
+def fetch_history(symbol):
     res = fyers.history({
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": int(start_ts),
-        "range_to": int(end_ts - 1),
+        "range_from": BIAS_FLOOR - 600,
+        "range_to": BIAS_FLOOR - 1,
         "cont_flag": "1"
     })
-    if res.get("s") == "ok":
-        return res.get("candles", [])
-    return []
+    return res.get("candles", []) if res.get("s") == "ok" else []
 
-# ============================================================
-# SECTOR BIAS
-# ============================================================
-from sector_engine import run_sector_bias
-from sector_mapping import SECTOR_MAP
-
-# ============================================================
-# GLOBAL STATE
-# ============================================================
-candles = {}
-history_c2_cumvol = {}   # 🔒 FIX: baseline from HISTORY C2
-last_candle_vol = {}
-
-LIVE_COUNTER = {}        # per symbol live index
-SELECTION_DONE = False
-SELECTED = set()
-
-# ============================================================
-# CANDLE ENGINE (FIXED)
-# ============================================================
-def candle_start(ts):
-    return ts - (ts % CANDLE_INTERVAL)
-
+# ---------------- CANDLE ENGINE ----------------
 def close_candle(symbol, c):
-    idx = LIVE_COUNTER.get(symbol, 0)
-    tag = "LIVE C" if idx == 0 else f"LIVE{idx+2}"
-    vol = c["cum_vol"] - last_candle_vol.get(symbol, c["cum_vol"])
-    last_candle_vol[symbol] = c["cum_vol"]
+    start = c["start"]
 
-    log_render(
-        f"{tag} | {symbol} | {fmt_ist(c['start'])} | "
-        f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} V={vol}"
+    if start < BIAS_FLOOR:
+        return  # ignore all pre-bias live candles
+
+    if symbol not in live_index:
+        live_index[symbol] = 3
+
+    idx = live_index[symbol]
+    vol = c["cum_vol"] - last_cum_vol.get(symbol, c["cum_vol"])
+    last_cum_vol[symbol] = c["cum_vol"]
+
+    log(
+        f"LIVE{idx} | {symbol} | {ist_str(start)} | "
+        f"O={c['o']} H={c['h']} L={c['l']} C={c['c']} V={vol}"
     )
 
-    LIVE_COUNTER[symbol] = idx + 1
+    live_index[symbol] += 1
 
-def update_candle(msg):
-    symbol = msg.get("symbol")
-    ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
-    ts = msg.get("exch_feed_time")
+def on_tick(msg):
+    symbol = msg["symbol"]
+    ts = msg["exch_feed_time"]
+    ltp = msg["ltp"]
+    cum = msg["vol_traded_today"]
 
-    if not symbol or ts is None:
-        return
-
-    start = candle_start(ts)
+    start = floor_5m(ts)
     c = candles.get(symbol)
 
-    if c is None or c["start"] != start:
+    if not c or c["start"] != start:
         if c:
             close_candle(symbol, c)
-
         candles[symbol] = {
             "start": start,
-            "open": ltp,
-            "high": ltp,
-            "low": ltp,
-            "close": ltp,
-            "cum_vol": vol
+            "o": ltp, "h": ltp, "l": ltp, "c": ltp,
+            "cum_vol": cum
         }
         return
 
-    c["high"] = max(c["high"], ltp)
-    c["low"] = min(c["low"], ltp)
-    c["close"] = ltp
-    c["cum_vol"] = vol
+    c["h"] = max(c["h"], ltp)
+    c["l"] = min(c["l"], ltp)
+    c["c"] = ltp
+    c["cum_vol"] = cum
 
-# ============================================================
-# WS CALLBACKS
-# ============================================================
-def on_message(msg):
-    update_candle(msg)
+# ---------------- WS ----------------
+from sector_mapping import SECTOR_MAP
 
 def on_connect():
-    from sector_mapping import SECTOR_MAP
-    all_symbols = sorted({s for v in SECTOR_MAP.values() for s in v})
-    fyers_ws.subscribe(symbols=all_symbols, data_type="SymbolUpdate")
-    print("🟢 WS CONNECTED | Subscribed ALL stocks", flush=True)
+    symbols = sorted({s for v in SECTOR_MAP.values() for s in v})
+    fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
+    log(f"Subscribed ALL stocks ({len(symbols)})")
 
-def on_error(msg): pass
-def on_close(msg): pass
+fyers_ws = data_ws.FyersDataSocket(
+    access_token=FYERS_ACCESS_TOKEN,
+    on_connect=on_connect,
+    on_message=on_tick,
+    reconnect=True
+)
 
-# ============================================================
-# WS START
-# ============================================================
-def start_ws():
-    global fyers_ws
-    fyers_ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_message,
-        on_connect=on_connect,
-        on_error=on_error,
-        on_close=on_close,
-        reconnect=True
-    )
-    fyers_ws.connect()
+threading.Thread(target=fyers_ws.connect, daemon=True).start()
 
-threading.Thread(target=start_ws, daemon=True).start()
+# ---------------- CONTROLLER ----------------
+from sector_engine import run_sector_bias
 
-# ============================================================
-# CONTROLLER
-# ============================================================
 def controller():
-    bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
-
-    while datetime.now(UTC) < bias_dt:
+    log(f"Waiting for BIAS TIME {BIAS_TIME}")
+    while int(time.time()) < BIAS_TS:
         time.sleep(1)
 
-    log("BIAS", "Sector bias check started")
     result = run_sector_bias()
-    selected = result.get("selected_stocks", [])
-    log("STOCKS", f"Selected={len(selected)}")
+    selected = result["selected_stocks"]
+    log(f"STOCKS | Selected={len(selected)}")
 
-    bias_ts = int(bias_dt.timestamp())
-    ref_end = floor_5min(bias_ts)
-    log("SYSTEM", f"History window = {fmt_ist(ref_end-600)}→{fmt_ist(ref_end)} IST")
-
-    for symbol in selected:
-        candles_h = fetch_two_history(symbol, ref_end)
-        if len(candles_h) >= 2:
-            c2 = candles_h[-1]
-            history_c2_cumvol[symbol] = c2[5]  # 🔒 STORE C2 CUM VOL
-            last_candle_vol[symbol] = c2[5]   # 🔒 FIX BASELINE
-
-            for ts, o, h, l, c, v in candles_h[:2]:
-                log_render(
-                    f"HISTORY | {symbol} | {fmt_ist(ts)} | "
+    for s in selected:
+        hist = fetch_history(s)
+        if len(hist) >= 2:
+            c2 = hist[-1]
+            history_c2_vol[s] = c2[5]
+            last_cum_vol[s] = c2[5]
+            for ts,o,h,l,c,v in hist[:2]:
+                log(
+                    f"HISTORY | {s} | {ist_str(ts)} | "
                     f"O={o} H={h} L={l} C={c} V={v}"
                 )
 
-    log("SYSTEM", "History COMPLETE (C1, C2 only)")
+    log("SYSTEM | History COMPLETE (C1, C2 only)")
 
 threading.Thread(target=controller, daemon=True).start()
 
-# ============================================================
-# FLASK START
-# ============================================================
+# ---------------- START ----------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
