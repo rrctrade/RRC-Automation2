@@ -1,6 +1,5 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py
-# LIVE3 volume FIXED (FYERS-style baseline seeding)
+# RajanTradeAutomation – FINAL main.py (LIVE3 FIXED)
 # ============================================================
 
 import os
@@ -75,7 +74,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (LIVE3 volume FIXED – FYERS baseline)")
+log("SYSTEM", "main.py FINAL (LIVE3 VOLUME FIXED)")
 
 # ============================================================
 # SETTINGS
@@ -100,7 +99,7 @@ def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY (unchanged)
+# HISTORY
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     start_ts = end_ts - 600
@@ -120,7 +119,7 @@ def fetch_two_history_candles(symbol, end_ts):
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 candles = {}
-last_cum_vol = {}   # 🔥 baseline seeded at candle start
+last_cum_vol = {}
 BT_FLOOR_TS = None
 
 def candle_start(ts):
@@ -134,10 +133,7 @@ def close_live_candle(symbol, c):
     if c["start"] < BT_FLOOR_TS:
         return
 
-    prev = last_cum_vol.get(symbol)
-    if prev is None:
-        prev = c["cum_vol"]  # safety
-
+    prev = last_cum_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
@@ -164,14 +160,13 @@ def update_candle(msg):
     start = candle_start(ts)
     c = candles.get(symbol)
 
+    # 🔑 CRITICAL FIX: LIVE3 RESET
+    if start == BT_FLOOR_TS and symbol not in last_cum_vol:
+        last_cum_vol[symbol] = vol
+
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
-
-        # ✅ CORE FIX:
-        # candle सुरू होताना FYERS देतो तोच cumulative volume baseline
-        if symbol not in last_cum_vol:
-            last_cum_vol[symbol] = vol
 
         candles[symbol] = {
             "start": start,
