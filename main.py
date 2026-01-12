@@ -1,5 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (LIVE3 FIXED)
+# RajanTradeAutomation – FINAL main.py
+# HISTORY (C1,C2) + EARLY WS + LIVE (C3+)
 # ============================================================
 
 import os
@@ -17,7 +18,7 @@ from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias
 
 # ============================================================
-# TIME
+# TIMEZONES
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
@@ -74,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (LIVE3 VOLUME FIXED)")
+log("SYSTEM", "main.py FINAL (EARLY WS + HISTORY + LIVE3 FIXED)")
 
 # ============================================================
 # SETTINGS
@@ -114,7 +115,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# WS + LIVE ENGINE
+# LIVE ENGINE (CORE)
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -125,19 +126,17 @@ BT_FLOOR_TS = None
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-def live_label(start_ts):
-    offset = (start_ts - BT_FLOOR_TS) // CANDLE_INTERVAL
-    return f"LIVE{offset + 3}"
-
 def close_live_candle(symbol, c):
-    if c["start"] < BT_FLOOR_TS:
+    # 🔒 Only LOG candles from BT_floor onward
+    if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
 
     prev = last_cum_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
-    label = live_label(c["start"])
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
 
     log_render(
         f"{label} | {symbol} | {fmt_ist(c['start'])} | "
@@ -146,9 +145,6 @@ def close_live_candle(symbol, c):
     )
 
 def update_candle(msg):
-    if BT_FLOOR_TS is None:
-        return
-
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
     vol = msg.get("vol_traded_today")
@@ -159,10 +155,6 @@ def update_candle(msg):
 
     start = candle_start(ts)
     c = candles.get(symbol)
-
-    # 🔑 CRITICAL FIX: LIVE3 RESET
-    if start == BT_FLOOR_TS and symbol not in last_cum_vol:
-        last_cum_vol[symbol] = vol
 
     if c is None or c["start"] != start:
         if c:
@@ -184,7 +176,7 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ============================================================
-# WS
+# WS CALLBACKS
 # ============================================================
 def on_message(msg):
     update_candle(msg)
@@ -194,6 +186,9 @@ def on_connect():
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
     print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
 
+# ============================================================
+# START WS
+# ============================================================
 def start_ws():
     global fyers_ws
     fyers_ws = data_ws.FyersDataSocket(
@@ -231,6 +226,10 @@ def controller():
     except Exception:
         pass
 
+    for s in non_selected:
+        candles.pop(s, None)
+        last_cum_vol.pop(s, None)
+
     log(
         "SYSTEM",
         f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
@@ -254,10 +253,6 @@ threading.Thread(target=controller, daemon=True).start()
 @app.route("/")
 def health():
     return jsonify({"status": "ok"})
-
-@app.route("/ping")
-def ping():
-    return jsonify({"status": "alive"})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
