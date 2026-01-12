@@ -228,12 +228,12 @@ def controller():
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
 
-    # ✅ ONLY ADD: sector name + adv/dec %
-    for s in res.get("selected_sectors", []):
+    # ✅ FIXED: log selected sectors correctly
+    for s in res.get("strong_sectors", []):
         log(
             "SECTOR",
-            f"{s.get('sector')} | ADV={s.get('advance_percent')}% "
-            f"DEC={s.get('decline_percent')}%"
+            f"{s.get('sector')} | {s.get('bias')} | "
+            f"ADV={s.get('up_pct')}% DEC={s.get('down_pct')}%"
         )
 
     selected = res.get("selected_stocks", [])
