@@ -85,8 +85,14 @@ def get_settings():
     return r.json().get("settings", {})
 
 SETTINGS = get_settings()
+
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
+
+# ✅ ONLY ADD
+PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
+
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
+log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
 
 # ============================================================
 # HELPERS
@@ -127,13 +133,12 @@ last_cum_vol = {}
 BT_FLOOR_TS = None
 
 def close_live_candle(symbol, c):
-    # Log ONLY candles >= BT_floor
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
 
     prev = last_cum_vol.get(symbol)
     if prev is None:
-        return  # safety guard
+        return
 
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
@@ -158,8 +163,6 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
-    # 🔒 CRITICAL FIX:
-    # Set baseline EXACTLY at BT_floor on first LIVE3 tick
     if BT_FLOOR_TS is not None and start == BT_FLOOR_TS and symbol not in last_cum_vol:
         last_cum_vol[symbol] = vol
 
