@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# HISTORY (C1,C2) + EARLY WS + LIVE (C3+)
+# STEP-1 : LOWEST VOLUME TRACKING (LOG ONLY)
 # ============================================================
 
 import os
@@ -75,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (EARLY WS + HISTORY + LIVE3 BASELINE FIXED)")
+log("SYSTEM", "main.py FINAL (STEP-1 LOWEST VOLUME TRACKING ENABLED)")
 
 # ============================================================
 # SETTINGS
@@ -85,7 +85,6 @@ def get_settings():
     return r.json().get("settings", {})
 
 SETTINGS = get_settings()
-
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
 
@@ -130,6 +129,10 @@ candles = {}
 last_cum_vol = {}
 BT_FLOOR_TS = None
 
+# 🔹 STEP-1 DATA STRUCTURES
+volume_history = {}     # symbol -> [vol1, vol2, ...]
+lowest_volume = {}      # symbol -> lowest so far
+
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
@@ -141,13 +144,17 @@ def close_live_candle(symbol, c):
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
+    # 🔹 STEP-1: lowest volume tracking
+    volume_history.setdefault(symbol, []).append(vol)
+    lv = min(volume_history[symbol])
+    lowest_volume[symbol] = lv
+
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
-    log_render(
-        f"{label} | {symbol} | {fmt_ist(c['start'])} | "
-        f"O={c['open']} H={c['high']} L={c['low']} "
-        f"C={c['close']} V={vol}"
+    log(
+        "VOL",
+        f"{symbol} | {label} | vol={vol} | lowest_so_far={lv}"
     )
 
 def update_candle(msg):
@@ -228,7 +235,6 @@ def controller():
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
 
-    # ✅ FIXED: log selected sectors correctly
     for s in res.get("strong_sectors", []):
         log(
             "SECTOR",
@@ -248,6 +254,8 @@ def controller():
     for s in non_selected:
         candles.pop(s, None)
         last_cum_vol.pop(s, None)
+        volume_history.pop(s, None)
+        lowest_volume.pop(s, None)
 
     log(
         "SYSTEM",
