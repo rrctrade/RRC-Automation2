@@ -75,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (EARLY WS + HISTORY + LIVE3 FIXED)")
+log("SYSTEM", "main.py FINAL (EARLY WS + HISTORY + LIVE3 BASELINE FIXED)")
 
 # ============================================================
 # SETTINGS
@@ -97,6 +97,9 @@ def parse_bias_time_utc(tstr):
     return ist_dt.astimezone(UTC)
 
 def floor_5min(ts):
+    return ts - (ts % CANDLE_INTERVAL)
+
+def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
@@ -123,15 +126,15 @@ candles = {}
 last_cum_vol = {}
 BT_FLOOR_TS = None
 
-def candle_start(ts):
-    return ts - (ts % CANDLE_INTERVAL)
-
 def close_live_candle(symbol, c):
-    # 🔒 Only LOG candles from BT_floor onward
+    # Log ONLY candles >= BT_floor
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
 
-    prev = last_cum_vol.get(symbol, c["cum_vol"])
+    prev = last_cum_vol.get(symbol)
+    if prev is None:
+        return  # safety guard
+
     vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
@@ -154,6 +157,12 @@ def update_candle(msg):
         return
 
     start = candle_start(ts)
+
+    # 🔒 CRITICAL FIX:
+    # Set baseline EXACTLY at BT_floor on first LIVE3 tick
+    if BT_FLOOR_TS is not None and start == BT_FLOOR_TS and symbol not in last_cum_vol:
+        last_cum_vol[symbol] = vol
+
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
