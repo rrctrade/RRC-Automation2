@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-1 : LOWEST VOLUME TRACKING (LOG ONLY)
+# STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
 # ============================================================
 
 import os
@@ -75,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 LOWEST VOLUME TRACKING ENABLED)")
+log("SYSTEM", "main.py FINAL (STEP-1 CORRECTED LOWEST VOLUME TRACKING)")
 
 # ============================================================
 # SETTINGS
@@ -129,32 +129,36 @@ candles = {}
 last_cum_vol = {}
 BT_FLOOR_TS = None
 
-# 🔹 STEP-1 DATA STRUCTURES
-volume_history = {}     # symbol -> [vol1, vol2, ...]
-lowest_volume = {}      # symbol -> lowest so far
+# STEP-1 DATA
+volume_history = {}   # symbol -> [v1, v2, v3, ...] (C1, C2, LIVE3...)
+current_min = {}      # symbol -> current min so far
 
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
 
-    prev = last_cum_vol.get(symbol)
-    if prev is None:
+    prev_cum = last_cum_vol.get(symbol)
+    if prev_cum is None:
         return
 
-    vol = c["cum_vol"] - prev
+    vol = c["cum_vol"] - prev_cum
     last_cum_vol[symbol] = c["cum_vol"]
 
-    # 🔹 STEP-1: lowest volume tracking
+    # strict compare against previous completed volumes
+    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
+    is_lowest = False
+    if prev_min is not None and vol < prev_min:
+        is_lowest = True
+
     volume_history.setdefault(symbol, []).append(vol)
-    lv = min(volume_history[symbol])
-    lowest_volume[symbol] = lv
+    current_min[symbol] = min(volume_history[symbol])
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
     log(
-        "VOL",
-        f"{symbol} | {label} | vol={vol} | lowest_so_far={lv}"
+        "VOLCHK",
+        f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | is_lowest={is_lowest}"
     )
 
 def update_candle(msg):
@@ -168,6 +172,7 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
+    # baseline cum vol at first LIVE3 tick
     if BT_FLOOR_TS is not None and start == BT_FLOOR_TS and symbol not in last_cum_vol:
         last_cum_vol[symbol] = vol
 
@@ -251,20 +256,27 @@ def controller():
     except Exception:
         pass
 
+    # cleanup non-selected
     for s in non_selected:
         candles.pop(s, None)
         last_cum_vol.pop(s, None)
         volume_history.pop(s, None)
-        lowest_volume.pop(s, None)
+        current_min.pop(s, None)
 
     log(
         "SYSTEM",
         f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
     )
 
+    # ---- FEED HISTORY VOLUMES (C1, C2) INTO TRACKER ----
     for s in selected:
+        volume_history.setdefault(s, [])
+        current_min.pop(s, None)
+
         for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
             if i < 2:
+                volume_history[s].append(v)
+                current_min[s] = min(volume_history[s])
                 log_render(
                     f"HISTORY | {s} | {fmt_ist(ts)} | "
                     f"O={o} H={h} L={l} C={c} V={v}"
