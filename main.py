@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# HISTORY (C1,C2) + EARLY WS + LIVE (C3+) + SIGNAL CANDLE
+# EARLY WS + HISTORY (C1,C2) + LIVE (C3+) + SIGNAL CANDLE
+# REGRESSION FIXED
 # ============================================================
 
 import os
@@ -18,7 +19,7 @@ from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias
 
 # ============================================================
-# TIMEZONES
+# TIME
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
@@ -75,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (Signal Candle Enabled)")
+log("SYSTEM", "main.py FINAL (Regression fixed + Signal Candle)")
 
 # ============================================================
 # SETTINGS
@@ -102,11 +103,21 @@ def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# STATE (SIGNAL ENGINE)
+# GLOBAL STATE
 # ============================================================
-trade_state = {}  
-# symbol → dict
+ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
+candles = {}
+last_cum_vol = {}
+trade_state = {}
+
+BT_FLOOR_TS = None
+BIAS = None
+SELECTED = []
+
+# ============================================================
+# TRADE STATE
+# ============================================================
 def reset_trade_state(symbol):
     trade_state[symbol] = {
         "lowest_vol": None,
@@ -119,82 +130,67 @@ def reset_trade_state(symbol):
 # HISTORY
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
-    start_ts = end_ts - 600
     res = fyers.history({
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": int(start_ts),
+        "range_from": int(end_ts - 600),
         "range_to": int(end_ts - 1),
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# LIVE ENGINE
+# SIGNAL ENGINE
 # ============================================================
-ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
-
-candles = {}
-last_cum_vol = {}
-BT_FLOOR_TS = None
-BIAS = None
-
 def process_closed_candle(symbol, c, vol):
-    state = trade_state[symbol]
+    state = trade_state.get(symbol)
+    if not state or BIAS is None:
+        return
 
     color = "RED" if c["open"] > c["close"] else "GREEN"
-    start_ts = c["start"]
 
     # init lowest volume
     if state["lowest_vol"] is None:
         state["lowest_vol"] = vol
 
-    # ---- pending cancel rule ----
+    # cancel pending on new lowest volume
     if state["pending"] and not state["executed"]:
         if vol < state["lowest_vol"]:
-            log(
-                "ORDER_CANCELLED",
-                f"{symbol} | NewLowestVol={vol} < Prev={state['lowest_vol']}"
-            )
+            log("ORDER_CANCELLED", f"{symbol} | NewLowestVolume={vol}")
             state["pending"] = False
             state["signal"] = None
             state["lowest_vol"] = vol
             return
 
-    # ---- update lowest volume ----
+    # new lowest volume
     if vol < state["lowest_vol"]:
         state["lowest_vol"] = vol
 
-        valid_color = (
+        valid = (
             (BIAS == "BUY" and color == "RED") or
             (BIAS == "SELL" and color == "GREEN")
         )
 
-        if valid_color:
+        if valid:
             entry = c["high"] if BIAS == "BUY" else c["low"]
             sl = c["low"] if BIAS == "BUY" else c["high"]
             qty = int(PER_TRADE_RISK / max(0.01, abs(entry - sl)))
 
-            state["signal"] = {
-                "entry": entry,
-                "sl": sl,
-                "qty": qty
-            }
+            state["signal"] = {"entry": entry, "sl": sl, "qty": qty}
             state["pending"] = True
 
-            log(
-                "SIGNAL_FOUND",
-                f"{symbol} | {fmt_ist(start_ts)} | "
+            log("SIGNAL_FOUND",
+                f"{symbol} | {fmt_ist(c['start'])} | "
                 f"O={c['open']} H={c['high']} L={c['low']} "
-                f"C={c['close']} V={vol} | COLOR={color}"
-            )
+                f"C={c['close']} V={vol}")
 
-            log(
-                "ORDER_PLACED",
-                f"{symbol} | ENTRY={entry} SL={sl} QTY={qty} | PENDING"
-            )
+            log("ORDER_PLACED",
+                f"{symbol} | ENTRY={entry} SL={sl} QTY={qty}")
 
+# ============================================================
+# LIVE CANDLES
+# ============================================================
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
@@ -225,36 +221,28 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
-    # baseline
     if BT_FLOOR_TS and start == BT_FLOOR_TS and symbol not in last_cum_vol:
         last_cum_vol[symbol] = vol
 
-    c = candles.get(symbol)
-
-    # ---- LTP execute check ----
     state = trade_state.get(symbol)
     if state and state["pending"] and not state["executed"]:
         sig = state["signal"]
         if BIAS == "BUY" and ltp >= sig["entry"]:
             state["executed"] = True
             state["pending"] = False
-            log(
-                "ORDER_EXECUTED",
-                f"{symbol} | BUY @ {sig['entry']} QTY={sig['qty']}"
-            )
+            log("ORDER_EXECUTED",
+                f"{symbol} | BUY @ {sig['entry']} QTY={sig['qty']}")
 
         if BIAS == "SELL" and ltp <= sig["entry"]:
             state["executed"] = True
             state["pending"] = False
-            log(
-                "ORDER_EXECUTED",
-                f"{symbol} | SELL @ {sig['entry']} QTY={sig['qty']}"
-            )
+            log("ORDER_EXECUTED",
+                f"{symbol} | SELL @ {sig['entry']} QTY={sig['qty']}")
 
+    c = candles.get(symbol)
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
-
         candles[symbol] = {
             "start": start,
             "open": ltp,
@@ -296,10 +284,10 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# CONTROLLER
+# CONTROLLER (CRITICAL FIX HERE)
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, BIAS
+    global BT_FLOOR_TS, BIAS, SELECTED
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     while datetime.now(UTC) < bias_dt:
@@ -308,14 +296,28 @@ def controller():
     BT_FLOOR_TS = candle_start(int(bias_dt.timestamp()))
 
     res = run_sector_bias()
-    selected = res.get("selected_stocks", [])
+
     BIAS = res.get("bias")
+    SELECTED = res.get("selected_stocks", [])
 
-    log("BIAS", f"BIAS={BIAS} | STOCKS={len(selected)}")
+    if not BIAS or not SELECTED:
+        log("BIAS", "Bias unresolved or no stocks → strategy paused")
+        return
 
-    for s in selected:
+    log("BIAS", f"BIAS={BIAS} | STOCKS={len(SELECTED)}")
+
+    non_selected = set(ALL_SYMBOLS) - set(SELECTED)
+    try:
+        fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    except Exception:
+        pass
+
+    for s in non_selected:
+        candles.pop(s, None)
+        last_cum_vol.pop(s, None)
+
+    for s in SELECTED:
         reset_trade_state(s)
-
         for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
             if i < 2:
                 log_render(
