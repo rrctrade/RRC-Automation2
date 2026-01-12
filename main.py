@@ -87,8 +87,6 @@ def get_settings():
 SETTINGS = get_settings()
 
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
-
-# ✅ ONLY ADD
 PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
 
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
@@ -229,6 +227,15 @@ def controller():
 
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
+
+    # ✅ ONLY ADD: sector name + adv/dec %
+    for s in res.get("selected_sectors", []):
+        log(
+            "SECTOR",
+            f"{s.get('sector')} | ADV={s.get('advance_percent')}% "
+            f"DEC={s.get('decline_percent')}%"
+        )
+
     selected = res.get("selected_stocks", [])
     log("STOCKS", f"Selected={len(selected)}")
 
