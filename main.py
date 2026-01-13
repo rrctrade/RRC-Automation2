@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
-# + SECTOR COUNT FILTERING (SAFE)
+# + DEBUG SECTOR COUNT LOGS
 # ============================================================
 
 import os
@@ -76,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 + SECTOR COUNT FILTERING SAFE)")
+log("SYSTEM", "main.py FINAL (STEP-1 + DEBUG SECTOR LOGS)")
 
 # ============================================================
 # SETTINGS
@@ -247,6 +247,10 @@ def controller():
     buy_sectors = [s for s in strong_sectors if s["bias"] == "BUY"]
     sell_sectors = [s for s in strong_sectors if s["bias"] == "SELL"]
 
+    # 🔍 DEBUG LOGS
+    log("DEBUG", f"BUY candidates = {len(buy_sectors)}")
+    log("DEBUG", f"SELL candidates = {len(sell_sectors)}")
+
     buy_sectors.sort(key=lambda x: x["up_pct"], reverse=True)
     sell_sectors.sort(key=lambda x: x["down_pct"], reverse=True)
 
@@ -254,6 +258,9 @@ def controller():
         buy_sectors = buy_sectors[:BUY_SECTOR_COUNT]
     if SELL_SECTOR_COUNT > 0:
         sell_sectors = sell_sectors[:SELL_SECTOR_COUNT]
+
+    log("DEBUG", f"BUY selected = {len(buy_sectors)}")
+    log("DEBUG", f"SELL selected = {len(sell_sectors)}")
 
     final_sectors = buy_sectors + sell_sectors
 
