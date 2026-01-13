@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
-# + SETTINGS-DRIVEN BUY / SELL SECTOR COUNT
+# + SECTOR COUNT FILTERING (SAFE)
 # ============================================================
 
 import os
@@ -16,7 +16,7 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
-from sector_engine import run_sector_bias
+from sector_engine import run_sector_bias, SECTOR_LIST
 
 # ============================================================
 # TIMEZONES
@@ -76,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 + SECTOR COUNT FILTERING)")
+log("SYSTEM", "main.py FINAL (STEP-1 + SECTOR COUNT FILTERING SAFE)")
 
 # ============================================================
 # SETTINGS
@@ -205,6 +205,7 @@ def on_message(msg):
     update_candle(msg)
 
 def on_connect():
+    print("🔗 WS CONNECTED", flush=True)
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
     print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
 
@@ -240,39 +241,38 @@ def controller():
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
 
-    strong = res.get("strong_sectors", [])
+    strong_sectors = res.get("strong_sectors", [])
+    all_selected_stocks = res.get("selected_stocks", [])
 
-    buy = [s for s in strong if s.get("bias") == "BUY"]
-    sell = [s for s in strong if s.get("bias") == "SELL"]
+    buy_sectors = [s for s in strong_sectors if s["bias"] == "BUY"]
+    sell_sectors = [s for s in strong_sectors if s["bias"] == "SELL"]
 
-    buy.sort(key=lambda x: x.get("up_pct", 0), reverse=True)
-    sell.sort(key=lambda x: x.get("down_pct", 0), reverse=True)
+    buy_sectors.sort(key=lambda x: x["up_pct"], reverse=True)
+    sell_sectors.sort(key=lambda x: x["down_pct"], reverse=True)
 
     if BUY_SECTOR_COUNT > 0:
-        buy = buy[:BUY_SECTOR_COUNT]
-
+        buy_sectors = buy_sectors[:BUY_SECTOR_COUNT]
     if SELL_SECTOR_COUNT > 0:
-        sell = sell[:SELL_SECTOR_COUNT]
-    else:
-        sell = []
+        sell_sectors = sell_sectors[:SELL_SECTOR_COUNT]
 
-    final_sectors = buy + sell
+    final_sectors = buy_sectors + sell_sectors
 
+    allowed_sector_keys = set()
     for s in final_sectors:
+        key = SECTOR_LIST.get(s["sector"])
+        if key:
+            allowed_sector_keys.add(key)
+
         log(
             "SECTOR",
-            f"{s.get('sector')} | {s.get('bias')} | "
-            f"ADV={s.get('up_pct')}% DEC={s.get('down_pct')}%"
+            f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%"
         )
 
-    allowed_sector_names = {s["sector"] for s in final_sectors}
+    allowed_symbols = set()
+    for key in allowed_sector_keys:
+        allowed_symbols.update(SECTOR_MAP.get(key, []))
 
-    selected = []
-    for sec_name, stocks in SECTOR_MAP.items():
-        if sec_name in allowed_sector_names:
-            selected.extend(stocks)
-
-    selected = sorted(set(selected))
+    selected = [s for s in all_selected_stocks if s in allowed_symbols]
     log("STOCKS", f"Selected={len(selected)}")
 
     non_selected = set(ALL_SYMBOLS) - set(selected)
