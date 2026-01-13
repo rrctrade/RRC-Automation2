@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
+# + SETTINGS-DRIVEN BUY / SELL SECTOR COUNT
 # ============================================================
 
 import os
@@ -75,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 CORRECTED LOWEST VOLUME TRACKING)")
+log("SYSTEM", "main.py FINAL (STEP-1 + SECTOR COUNT FILTERING)")
 
 # ============================================================
 # SETTINGS
@@ -85,11 +86,16 @@ def get_settings():
     return r.json().get("settings", {})
 
 SETTINGS = get_settings()
+
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
+BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
+SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
+log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
+log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
 # ============================================================
 # HELPERS
@@ -129,9 +135,8 @@ candles = {}
 last_cum_vol = {}
 BT_FLOOR_TS = None
 
-# STEP-1 DATA
-volume_history = {}   # symbol -> [v1, v2, v3, ...] (C1, C2, LIVE3...)
-current_min = {}      # symbol -> current min so far
+volume_history = {}
+current_min = {}
 
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
@@ -144,11 +149,8 @@ def close_live_candle(symbol, c):
     vol = c["cum_vol"] - prev_cum
     last_cum_vol[symbol] = c["cum_vol"]
 
-    # strict compare against previous completed volumes
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = False
-    if prev_min is not None and vol < prev_min:
-        is_lowest = True
+    is_lowest = prev_min is not None and vol < prev_min
 
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
@@ -172,7 +174,6 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
-    # baseline cum vol at first LIVE3 tick
     if BT_FLOOR_TS is not None and start == BT_FLOOR_TS and symbol not in last_cum_vol:
         last_cum_vol[symbol] = vol
 
@@ -204,7 +205,6 @@ def on_message(msg):
     update_candle(msg)
 
 def on_connect():
-    print("🔗 WS CONNECTED", flush=True)
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
     print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
 
@@ -240,14 +240,39 @@ def controller():
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
 
-    for s in res.get("strong_sectors", []):
+    strong = res.get("strong_sectors", [])
+
+    buy = [s for s in strong if s.get("bias") == "BUY"]
+    sell = [s for s in strong if s.get("bias") == "SELL"]
+
+    buy.sort(key=lambda x: x.get("up_pct", 0), reverse=True)
+    sell.sort(key=lambda x: x.get("down_pct", 0), reverse=True)
+
+    if BUY_SECTOR_COUNT > 0:
+        buy = buy[:BUY_SECTOR_COUNT]
+
+    if SELL_SECTOR_COUNT > 0:
+        sell = sell[:SELL_SECTOR_COUNT]
+    else:
+        sell = []
+
+    final_sectors = buy + sell
+
+    for s in final_sectors:
         log(
             "SECTOR",
             f"{s.get('sector')} | {s.get('bias')} | "
             f"ADV={s.get('up_pct')}% DEC={s.get('down_pct')}%"
         )
 
-    selected = res.get("selected_stocks", [])
+    allowed_sector_names = {s["sector"] for s in final_sectors}
+
+    selected = []
+    for sec_name, stocks in SECTOR_MAP.items():
+        if sec_name in allowed_sector_names:
+            selected.extend(stocks)
+
+    selected = sorted(set(selected))
     log("STOCKS", f"Selected={len(selected)}")
 
     non_selected = set(ALL_SYMBOLS) - set(selected)
@@ -256,7 +281,6 @@ def controller():
     except Exception:
         pass
 
-    # cleanup non-selected
     for s in non_selected:
         candles.pop(s, None)
         last_cum_vol.pop(s, None)
@@ -268,7 +292,6 @@ def controller():
         f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
     )
 
-    # ---- FEED HISTORY VOLUMES (C1, C2) INTO TRACKER ----
     for s in selected:
         volume_history.setdefault(s, [])
         current_min.pop(s, None)
