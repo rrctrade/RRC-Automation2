@@ -1,7 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
-# + SETTINGS-DRIVEN BUY/SELL SECTOR LIMITING
 # ============================================================
 
 import os
@@ -76,7 +75,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 + SECTOR COUNT LIMITING)")
+log("SYSTEM", "main.py FINAL (STEP-1 CORRECTED LOWEST VOLUME TRACKING)")
 
 # ============================================================
 # SETTINGS
@@ -86,16 +85,11 @@ def get_settings():
     return r.json().get("settings", {})
 
 SETTINGS = get_settings()
-
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
-BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
-SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
-log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
-log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
 # ============================================================
 # HELPERS
@@ -136,8 +130,8 @@ last_cum_vol = {}
 BT_FLOOR_TS = None
 
 # STEP-1 DATA
-volume_history = {}
-current_min = {}
+volume_history = {}   # symbol -> [v1, v2, v3, ...] (C1, C2, LIVE3...)
+current_min = {}      # symbol -> current min so far
 
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
@@ -150,8 +144,11 @@ def close_live_candle(symbol, c):
     vol = c["cum_vol"] - prev_cum
     last_cum_vol[symbol] = c["cum_vol"]
 
+    # strict compare against previous completed volumes
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = prev_min is not None and vol < prev_min
+    is_lowest = False
+    if prev_min is not None and vol < prev_min:
+        is_lowest = True
 
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
@@ -175,6 +172,7 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
+    # baseline cum vol at first LIVE3 tick
     if BT_FLOOR_TS is not None and start == BT_FLOOR_TS and symbol not in last_cum_vol:
         last_cum_vol[symbol] = vol
 
@@ -242,23 +240,7 @@ def controller():
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
 
-    all_sectors = res.get("strong_sectors", [])
-
-    buy_sectors = [s for s in all_sectors if s.get("bias") == "BUY"]
-    sell_sectors = [s for s in all_sectors if s.get("bias") == "SELL"]
-
-    buy_sectors.sort(key=lambda x: x.get("up_pct", 0), reverse=True)
-    sell_sectors.sort(key=lambda x: x.get("down_pct", 0), reverse=True)
-
-    if BUY_SECTOR_COUNT > 0:
-        buy_sectors = buy_sectors[:BUY_SECTOR_COUNT]
-
-    if SELL_SECTOR_COUNT > 0:
-        sell_sectors = sell_sectors[:SELL_SECTOR_COUNT]
-
-    final_sectors = buy_sectors + sell_sectors
-
-    for s in final_sectors:
+    for s in res.get("strong_sectors", []):
         log(
             "SECTOR",
             f"{s.get('sector')} | {s.get('bias')} | "
@@ -274,6 +256,7 @@ def controller():
     except Exception:
         pass
 
+    # cleanup non-selected
     for s in non_selected:
         candles.pop(s, None)
         last_cum_vol.pop(s, None)
@@ -285,6 +268,7 @@ def controller():
         f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
     )
 
+    # ---- FEED HISTORY VOLUMES (C1, C2) INTO TRACKER ----
     for s in selected:
         volume_history.setdefault(s, [])
         current_min.pop(s, None)
