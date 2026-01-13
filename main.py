@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-2 : LOWEST VOLUME + SIGNAL CANDLE DETECTION
+# STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
+# + DEBUG SECTOR COUNT LOGS
 # ============================================================
 
 import os
@@ -75,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-2 SIGNAL CANDLE)")
+log("SYSTEM", "main.py FINAL (STEP-1 + DEBUG SECTOR LOGS)")
 
 # ============================================================
 # SETTINGS
@@ -87,10 +88,14 @@ def get_settings():
 SETTINGS = get_settings()
 
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
+PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
+log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
+log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
+log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
 # ============================================================
 # HELPERS
@@ -122,7 +127,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# LIVE ENGINE
+# LIVE ENGINE (CORE)
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -132,7 +137,6 @@ BT_FLOOR_TS = None
 
 volume_history = {}
 current_min = {}
-BIAS_SIDE = None   # BUY / SELL
 
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
@@ -151,38 +155,21 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
 
+    # 🕯️ Candle Color (ONLY ADDITION)
+    if c["open"] > c["close"]:
+        color = "RED"
+    elif c["open"] < c["close"]:
+        color = "GREEN"
+    else:
+        color = "DOJI"
+
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
     log(
         "VOLCHK",
-        f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | is_lowest={is_lowest}"
+        f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | is_lowest={is_lowest} | {color}"
     )
-
-    # ========================================================
-    # 🔔 SIGNAL CANDLE DETECTION (ONLY ADDITION)
-    # ========================================================
-    if is_lowest and BIAS_SIDE:
-        o = c["open"]
-        cl = c["close"]
-
-        is_red = o > cl
-        is_green = o < cl
-
-        signal = False
-
-        if BIAS_SIDE == "BUY" and is_red:
-            signal = True
-
-        if BIAS_SIDE == "SELL" and is_green:
-            signal = True
-
-        if signal:
-            log(
-                "SIGNAL",
-                f"{symbol} | {label} | {BIAS_SIDE} | "
-                f"O={o} H={c['high']} L={c['low']} C={cl} | vol={vol}"
-            )
 
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -230,6 +217,9 @@ def on_connect():
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
     print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
 
+# ============================================================
+# START WS
+# ============================================================
 def start_ws():
     global fyers_ws
     fyers_ws = data_ws.FyersDataSocket(
@@ -246,35 +236,77 @@ threading.Thread(target=start_ws, daemon=True).start()
 # CONTROLLER
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, BIAS_SIDE
+    global BT_FLOOR_TS
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
+    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
 
     while datetime.now(UTC) < bias_dt:
         time.sleep(1)
 
     BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
 
+    log("BIAS", "Sector bias check started")
     res = run_sector_bias()
+
     strong_sectors = res.get("strong_sectors", [])
+    all_selected_stocks = res.get("selected_stocks", [])
 
-    buy = [s for s in strong_sectors if s["bias"] == "BUY"]
-    sell = [s for s in strong_sectors if s["bias"] == "SELL"]
+    buy_sectors = [s for s in strong_sectors if s["bias"] == "BUY"]
+    sell_sectors = [s for s in strong_sectors if s["bias"] == "SELL"]
 
-    if buy:
-        BIAS_SIDE = "BUY"
-    elif sell:
-        BIAS_SIDE = "SELL"
+    log("DEBUG", f"BUY candidates = {len(buy_sectors)}")
+    log("DEBUG", f"SELL candidates = {len(sell_sectors)}")
 
-    log("BIAS", f"Final Bias = {BIAS_SIDE}")
+    buy_sectors.sort(key=lambda x: x["up_pct"], reverse=True)
+    sell_sectors.sort(key=lambda x: x["down_pct"], reverse=True)
+
+    if BUY_SECTOR_COUNT > 0:
+        buy_sectors = buy_sectors[:BUY_SECTOR_COUNT]
+    if SELL_SECTOR_COUNT > 0:
+        sell_sectors = sell_sectors[:SELL_SECTOR_COUNT]
+
+    log("DEBUG", f"BUY selected = {len(buy_sectors)}")
+    log("DEBUG", f"SELL selected = {len(sell_sectors)}")
+
+    final_sectors = buy_sectors + sell_sectors
+
+    allowed_sector_keys = set()
+    for s in final_sectors:
+        key = SECTOR_LIST.get(s["sector"])
+        if key:
+            allowed_sector_keys.add(key)
+
+        log(
+            "SECTOR",
+            f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%"
+        )
+
+    allowed_symbols = set()
+    for key in allowed_sector_keys:
+        allowed_symbols.update(SECTOR_MAP.get(key, []))
+
+    selected = [s for s in all_selected_stocks if s in allowed_symbols]
+    log("STOCKS", f"Selected={len(selected)}")
+
+    non_selected = set(ALL_SYMBOLS) - set(selected)
+    try:
+        fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    except Exception:
+        pass
+
+    for s in non_selected:
+        candles.pop(s, None)
+        last_cum_vol.pop(s, None)
+        volume_history.pop(s, None)
+        current_min.pop(s, None)
 
     log(
         "SYSTEM",
-        f"History window = {fmt_ist(BT_FLOOR_TS-600)} → {fmt_ist(BT_FLOOR_TS)}"
+        f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
     )
 
-    for s in res.get("selected_stocks", []):
+    for s in selected:
         volume_history.setdefault(s, [])
         current_min.pop(s, None)
 
@@ -283,7 +315,8 @@ def controller():
                 volume_history[s].append(v)
                 current_min[s] = min(volume_history[s])
                 log_render(
-                    f"HISTORY | {s} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}"
+                    f"HISTORY | {s} | {fmt_ist(ts)} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
                 )
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
