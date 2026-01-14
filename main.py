@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-1 + STEP-2B (Signal Engine Integrated)
+# STEP-1 + STEP-2B + HISTORY RESTORED
 # ============================================================
 
 import os
@@ -16,7 +16,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
-import signal_engine   # 🆕 STEP-2B
+import signal_engine
 
 # ============================================================
 # TIMEZONES
@@ -76,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 + STEP-2B integrated)")
+log("SYSTEM", "main.py FINAL (STEP-1 + STEP-2B + HISTORY RESTORED)")
 
 # ============================================================
 # SETTINGS
@@ -88,7 +88,6 @@ def get_settings():
 SETTINGS = get_settings()
 
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
-PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
@@ -126,7 +125,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# LIVE ENGINE
+# LIVE ENGINE DATA
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -139,7 +138,7 @@ current_min = {}
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# CLOSE CANDLE
+# CLOSE LIVE CANDLE
 # ============================================================
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
@@ -158,7 +157,6 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
 
-    # Candle color
     if c["open"] > c["close"]:
         color = "RED"
     elif c["open"] < c["close"]:
@@ -176,7 +174,6 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias_tag}".strip()
     )
 
-    # 🧠 STEP-2B : signal engine hook
     instr = signal_engine.on_candle_close(
         symbol=symbol,
         candle_label=label,
@@ -231,7 +228,6 @@ def update_candle(msg):
     c["close"] = ltp
     c["cum_vol"] = vol
 
-    # 🧠 STEP-2B : execution check
     instr = signal_engine.on_ltp_update(symbol, ltp)
     if instr:
         log("SIGNAL", instr)
@@ -314,9 +310,30 @@ def controller():
 
     selected = [s for s in all_selected_stocks if s in allowed_symbols]
 
-    # 🧠 INIT SIGNAL STATES (VERY IMPORTANT)
+    # INIT SIGNAL STATES
     signal_engine.init_symbols(selected)
     log("SYSTEM", f"Signal engine initialized for {len(selected)} stocks")
+
+    # ================= HISTORY PRELOAD =================
+    log("SYSTEM", f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST")
+
+    for s in selected:
+        volume_history.setdefault(s, [])
+        current_min.pop(s, None)
+        candles.pop(s, None)
+        last_cum_vol.pop(s, None)
+
+        hist = fetch_two_history_candles(s, BT_FLOOR_TS)
+        for i, (ts,o,h,l,c,v) in enumerate(hist):
+            if i < 2:
+                volume_history[s].append(v)
+                current_min[s] = min(volume_history[s])
+                log_render(
+                    f"HISTORY | {s} | {fmt_ist(ts)} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
+                )
+
+    log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
 threading.Thread(target=controller, daemon=True).start()
 
