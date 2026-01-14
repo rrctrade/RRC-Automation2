@@ -138,6 +138,9 @@ BT_FLOOR_TS = None
 volume_history = {}
 current_min = {}
 
+# 👉 NEW (MINIMAL): symbol -> bias char map (B / S)
+STOCK_BIAS_MAP = {}
+
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
@@ -155,7 +158,7 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
 
-    # 🕯️ Candle Color (ONLY ADDITION)
+    # 🕯️ Candle Color
     if c["open"] > c["close"]:
         color = "RED"
     elif c["open"] < c["close"]:
@@ -163,12 +166,16 @@ def close_live_candle(symbol, c):
     else:
         color = "DOJI"
 
+    # 👉 NEW (MINIMAL): B / S after COLOR
+    bias_tag = STOCK_BIAS_MAP.get(symbol, "")
+
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
     log(
         "VOLCHK",
-        f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | is_lowest={is_lowest} | {color}"
+        f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | "
+        f"is_lowest={is_lowest} | {color} {bias_tag}".strip()
     )
 
 def update_candle(msg):
@@ -236,7 +243,7 @@ threading.Thread(target=start_ws, daemon=True).start()
 # CONTROLLER
 # ============================================================
 def controller():
-    global BT_FLOOR_TS
+    global BT_FLOOR_TS, STOCK_BIAS_MAP
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
@@ -281,6 +288,16 @@ def controller():
             "SECTOR",
             f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%"
         )
+
+    # 👉 NEW (MINIMAL): build symbol -> B/S map from final sectors
+    STOCK_BIAS_MAP = {}
+    for s in final_sectors:
+        key = SECTOR_LIST.get(s["sector"])
+        if not key:
+            continue
+        tag = "B" if s["bias"] == "BUY" else "S"
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = tag
 
     allowed_symbols = set()
     for key in allowed_sector_keys:
