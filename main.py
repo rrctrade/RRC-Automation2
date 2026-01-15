@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-1 (CORRECTED): HISTORY + LIVE LOGS RESTORED
+# STEP-1 : HISTORY + LIVE LOGS (RESTORED & VERIFIED)
 # ============================================================
 
 import os
@@ -298,7 +298,7 @@ def controller():
             if i < 2:
                 volume_history[s].append(v)
                 current_min[s] = min(volume_history[s])
-                log("HISTORY", f"{s} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
+                log("INFO", f"HISTORY | {s} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
