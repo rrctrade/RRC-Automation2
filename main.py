@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-1 : HISTORY + LIVE LOGS (RESTORED & VERIFIED)
+# STEP-1 (CORRECTED): LOWEST VOLUME TRACKING (HISTORY + LIVE)
+# + DEBUG SECTOR COUNT LOGS
 # ============================================================
 
 import os
@@ -60,6 +61,10 @@ def log(level, msg):
     except Exception:
         pass
 
+def log_render(msg):
+    ts = datetime.now(IST).strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
@@ -71,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-1 – HISTORY + LIVE LOGS)")
+log("SYSTEM", "main.py FINAL (STEP-1 + DEBUG SECTOR LOGS)")
 
 # ============================================================
 # SETTINGS
@@ -122,7 +127,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# LIVE ENGINE
+# LIVE ENGINE (CORE)
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -132,6 +137,8 @@ BT_FLOOR_TS = None
 
 volume_history = {}
 current_min = {}
+
+# 👉 NEW (MINIMAL): symbol -> bias char map (B / S)
 STOCK_BIAS_MAP = {}
 
 def close_live_candle(symbol, c):
@@ -151,6 +158,7 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
 
+    # 🕯️ Candle Color
     if c["open"] > c["close"]:
         color = "RED"
     elif c["open"] < c["close"]:
@@ -158,14 +166,16 @@ def close_live_candle(symbol, c):
     else:
         color = "DOJI"
 
+    # 👉 NEW (MINIMAL): B / S after COLOR
     bias_tag = STOCK_BIAS_MAP.get(symbol, "")
+
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
     log(
         "VOLCHK",
         f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | "
-        f"is_lowest={is_lowest} | {color} {bias_tag}"
+        f"is_lowest={is_lowest} | {color} {bias_tag}".strip()
     )
 
 def update_candle(msg):
@@ -204,15 +214,19 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ============================================================
-# WS
+# WS CALLBACKS
 # ============================================================
 def on_message(msg):
     update_candle(msg)
 
 def on_connect():
+    print("🔗 WS CONNECTED", flush=True)
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-    log("SYSTEM", f"Subscribed ALL stocks ({len(ALL_SYMBOLS)})")
+    print(f"📦 Subscribed ALL stocks ({len(ALL_SYMBOLS)})", flush=True)
 
+# ============================================================
+# START WS
+# ============================================================
 def start_ws():
     global fyers_ws
     fyers_ws = data_ws.FyersDataSocket(
@@ -248,6 +262,9 @@ def controller():
     buy_sectors = [s for s in strong_sectors if s["bias"] == "BUY"]
     sell_sectors = [s for s in strong_sectors if s["bias"] == "SELL"]
 
+    log("DEBUG", f"BUY candidates = {len(buy_sectors)}")
+    log("DEBUG", f"SELL candidates = {len(sell_sectors)}")
+
     buy_sectors.sort(key=lambda x: x["up_pct"], reverse=True)
     sell_sectors.sort(key=lambda x: x["down_pct"], reverse=True)
 
@@ -256,6 +273,9 @@ def controller():
     if SELL_SECTOR_COUNT > 0:
         sell_sectors = sell_sectors[:SELL_SECTOR_COUNT]
 
+    log("DEBUG", f"BUY selected = {len(buy_sectors)}")
+    log("DEBUG", f"SELL selected = {len(sell_sectors)}")
+
     final_sectors = buy_sectors + sell_sectors
 
     allowed_sector_keys = set()
@@ -263,11 +283,18 @@ def controller():
         key = SECTOR_LIST.get(s["sector"])
         if key:
             allowed_sector_keys.add(key)
-        log("SECTOR", f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%")
 
+        log(
+            "SECTOR",
+            f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%"
+        )
+
+    # 👉 NEW (MINIMAL): build symbol -> B/S map from final sectors
     STOCK_BIAS_MAP = {}
     for s in final_sectors:
         key = SECTOR_LIST.get(s["sector"])
+        if not key:
+            continue
         tag = "B" if s["bias"] == "BUY" else "S"
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = tag
@@ -280,7 +307,10 @@ def controller():
     log("STOCKS", f"Selected={len(selected)}")
 
     non_selected = set(ALL_SYMBOLS) - set(selected)
-    fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    try:
+        fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    except Exception:
+        pass
 
     for s in non_selected:
         candles.pop(s, None)
@@ -288,7 +318,10 @@ def controller():
         volume_history.pop(s, None)
         current_min.pop(s, None)
 
-    log("SYSTEM", f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST")
+    log(
+        "SYSTEM",
+        f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST"
+    )
 
     for s in selected:
         volume_history.setdefault(s, [])
@@ -298,7 +331,10 @@ def controller():
             if i < 2:
                 volume_history[s].append(v)
                 current_min[s] = min(volume_history[s])
-                log("INFO", f"HISTORY | {s} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
+                log_render(
+                    f"HISTORY | {s} | {fmt_ist(ts)} | "
+                    f"O={o} H={h} L={l} C={c} V={v}"
+                )
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
 
@@ -313,7 +349,12 @@ def health():
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
+    code = request.args.get("code") or request.args.get("auth_code")
+    log("SYSTEM", f"FYERS redirect | code={code}")
     return jsonify({"status": "ok"})
 
+# ============================================================
+# START
+# ============================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
