@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-2A : Signal Candle → Immediate SL-M Trigger Order
+# STEP-2A + STEP-2B-A : LOWEST VOLUME NUMBERED LOG
 # ============================================================
 
 import os
@@ -16,7 +16,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
-from signal_candle_order import place_signal_order   # ✅ CORRECT IMPORT
+from signal_candle_order import place_signal_order
 
 # ============================================================
 # TIMEZONES
@@ -72,7 +72,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL STEP-2A")
+log("SYSTEM", "main.py FINAL STEP-2A + LOWEST NUMBERING")
 
 # ============================================================
 # SETTINGS
@@ -133,6 +133,9 @@ volume_history = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
+# 🔴 NEW : lowest volume counter per symbol
+lowest_counter = {}
+
 # ============================================================
 # CLOSE CANDLE
 # ============================================================
@@ -170,7 +173,20 @@ def close_live_candle(symbol, c):
     )
 
     # =====================================================
-    # STEP-2A BUY SIGNAL
+    # STEP-2B-A : LOWEST VOLUME EVENT (NUMBERED, LOG ONLY)
+    # =====================================================
+    if is_lowest:
+        cnt = lowest_counter.get(symbol, 0) + 1
+        lowest_counter[symbol] = cnt
+
+        log(
+            "LOWEST",
+            f"{symbol} | {label} | LOWEST#{cnt} | "
+            f"vol={vol} | prev_min={prev_min} | {color} {bias_tag}"
+        )
+
+    # =====================================================
+    # STEP-2A BUY SIGNAL (UNCHANGED)
     # =====================================================
     if (
         label == "LIVE3"
@@ -277,12 +293,10 @@ def controller():
         reverse=True
     )[:BUY_SECTOR_COUNT]
 
-    final_secs = buy_secs
-
     allowed_symbols = set()
     STOCK_BIAS_MAP = {}
 
-    for s in final_secs:
+    for s in buy_secs:
         key = SECTOR_LIST.get(s["sector"])
         log("SECTOR", f"{s['sector']} | BUY | {s['up_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
