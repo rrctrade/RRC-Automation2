@@ -16,7 +16,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
-from signal_candle_order import place_signal_order
+from signal_candle_order import place_buy_trigger_order   # ✅ FIXED
 
 # ============================================================
 # TIMEZONES
@@ -87,7 +87,7 @@ def get_settings():
 
 SETTINGS = get_settings()
 
-MODE = SETTINGS.get("MODE", "PAPER").upper()   # 🔴 NEW
+MODE = SETTINGS.get("MODE", "PAPER").upper()
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
@@ -136,7 +136,6 @@ ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 candles = {}
 last_cum_vol = {}
 volume_history = {}
-current_min = {}
 
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
@@ -159,7 +158,6 @@ def close_live_candle(symbol, c):
     is_lowest = prev_min is not None and vol < prev_min
 
     volume_history.setdefault(symbol, []).append(vol)
-    current_min[symbol] = min(volume_history[symbol])
 
     if c["open"] > c["close"]:
         color = "RED"
@@ -190,15 +188,13 @@ def close_live_candle(symbol, c):
     ):
         log("SIGNAL", f"BUY_SIGNAL | {symbol} | LIVE3 | MODE={MODE}")
 
-        place_signal_order(
+        place_buy_trigger_order(
             fyers=fyers,
+            settings=SETTINGS,
+            log=log,
             symbol=symbol,
-            side="BUY",
             high=c["high"],
-            low=c["low"],
-            per_trade_risk=PER_TRADE_RISK,
-            mode=MODE,
-            log_fn=lambda m: log("ORDER", m),
+            low=c["low"]
         )
 
 # ============================================================
@@ -296,23 +292,16 @@ def controller():
 
     final_sectors = buy_sectors + sell_sectors
 
-    allowed_sector_keys = set()
-    for s in final_sectors:
-        key = SECTOR_LIST.get(s["sector"])
-        if key:
-            allowed_sector_keys.add(key)
-        log("SECTOR", f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%")
-
     STOCK_BIAS_MAP = {}
+    allowed_symbols = set()
+
     for s in final_sectors:
         key = SECTOR_LIST.get(s["sector"])
         tag = "B" if s["bias"] == "BUY" else "S"
+        log("SECTOR", f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = tag
-
-    allowed_symbols = set()
-    for k in allowed_sector_keys:
-        allowed_symbols.update(SECTOR_MAP.get(k, []))
+            allowed_symbols.add(sym)
 
     selected = [s for s in all_selected if s in allowed_symbols]
     log("STOCKS", f"Selected={len(selected)}")
@@ -324,17 +313,14 @@ def controller():
         candles.pop(s, None)
         last_cum_vol.pop(s, None)
         volume_history.pop(s, None)
-        current_min.pop(s, None)
 
     log("SYSTEM", f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST")
 
     for s in selected:
         volume_history.setdefault(s, [])
-        current_min.pop(s, None)
         for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
             if i < 2:
                 volume_history[s].append(v)
-                current_min[s] = min(volume_history[s])
                 log_render(f"HISTORY | {s} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
 
     log("SYSTEM", "History COMPLETE (C1, C2 only)")
