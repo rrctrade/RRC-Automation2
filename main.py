@@ -16,14 +16,14 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
-from signal_candle_order import place_buy_trigger_order   # ✅ FIXED
+from signal_candle_order import place_signal_order   # ✅ CORRECT IMPORT
 
 # ============================================================
 # TIMEZONES
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
-CANDLE_INTERVAL = 300
+CANDLE_INTERVAL = 300  # 5 min
 
 # ============================================================
 # ENV
@@ -61,10 +61,6 @@ def log(level, msg):
     except Exception:
         pass
 
-def log_render(msg):
-    ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
@@ -76,7 +72,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-2A SL-M)")
+log("SYSTEM", "main.py FINAL STEP-2A")
 
 # ============================================================
 # SETTINGS
@@ -96,11 +92,9 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 log("SETTINGS", f"MODE={MODE}")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
-log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
-log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
 # ============================================================
-# HELPERS
+# TIME HELPERS
 # ============================================================
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -117,19 +111,18 @@ def candle_start(ts):
 # HISTORY
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
-    start_ts = end_ts - 600
     res = fyers.history({
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": int(start_ts),
+        "range_from": int(end_ts - 600),
         "range_to": int(end_ts - 1),
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# LIVE ENGINE
+# LIVE ENGINE STATE
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -156,7 +149,6 @@ def close_live_candle(symbol, c):
 
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
     is_lowest = prev_min is not None and vol < prev_min
-
     volume_history.setdefault(symbol, []).append(vol)
 
     if c["open"] > c["close"]:
@@ -178,7 +170,7 @@ def close_live_candle(symbol, c):
     )
 
     # =====================================================
-    # STEP-2A : IMMEDIATE SL-M TRIGGER ORDER
+    # STEP-2A BUY SIGNAL
     # =====================================================
     if (
         label == "LIVE3"
@@ -186,15 +178,17 @@ def close_live_candle(symbol, c):
         and color == "RED"
         and is_lowest
     ):
-        log("SIGNAL", f"BUY_SIGNAL | {symbol} | LIVE3 | MODE={MODE}")
+        log("SIGNAL", f"BUY_SIGNAL | {symbol} | LIVE3")
 
-        place_buy_trigger_order(
+        place_signal_order(
             fyers=fyers,
-            settings=SETTINGS,
-            log=log,
             symbol=symbol,
+            side="BUY",
             high=c["high"],
-            low=c["low"]
+            low=c["low"],
+            per_trade_risk=PER_TRADE_RISK,
+            mode=MODE,
+            log_fn=lambda m: log("ORDER", m),
         )
 
 # ============================================================
@@ -211,7 +205,7 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
-    if BT_FLOOR_TS is not None and start == BT_FLOOR_TS and symbol not in last_cum_vol:
+    if BT_FLOOR_TS and start == BT_FLOOR_TS and symbol not in last_cum_vol:
         last_cum_vol[symbol] = vol
 
     c = candles.get(symbol)
@@ -236,7 +230,7 @@ def update_candle(msg):
     c["cum_vol"] = vol
 
 # ============================================================
-# WS CALLBACKS
+# WEBSOCKET
 # ============================================================
 def on_message(msg):
     update_candle(msg)
@@ -244,11 +238,7 @@ def on_message(msg):
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-    log("SYSTEM", f"Subscribed ALL stocks ({len(ALL_SYMBOLS)})")
 
-# ============================================================
-# START WS
-# ============================================================
 def start_ws():
     global fyers_ws
     fyers_ws = data_ws.FyersDataSocket(
@@ -268,62 +258,55 @@ def controller():
     global BT_FLOOR_TS, STOCK_BIAS_MAP
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR} IST")
+    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
     while datetime.now(UTC) < bias_dt:
         time.sleep(1)
 
     BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
 
-    log("BIAS", "Sector bias check started")
+    log("BIAS", "Sector bias started")
     res = run_sector_bias()
 
-    strong_sectors = res.get("strong_sectors", [])
+    strong = res.get("strong_sectors", [])
     all_selected = res.get("selected_stocks", [])
 
-    buy_sectors = [s for s in strong_sectors if s["bias"] == "BUY"]
-    sell_sectors = [s for s in strong_sectors if s["bias"] == "SELL"]
+    buy_secs = sorted(
+        [s for s in strong if s["bias"] == "BUY"],
+        key=lambda x: x["up_pct"],
+        reverse=True
+    )[:BUY_SECTOR_COUNT]
 
-    buy_sectors.sort(key=lambda x: x["up_pct"], reverse=True)
-    sell_sectors.sort(key=lambda x: x["down_pct"], reverse=True)
+    final_secs = buy_secs
 
-    buy_sectors = buy_sectors[:BUY_SECTOR_COUNT]
-    sell_sectors = sell_sectors[:SELL_SECTOR_COUNT]
-
-    final_sectors = buy_sectors + sell_sectors
-
-    STOCK_BIAS_MAP = {}
     allowed_symbols = set()
+    STOCK_BIAS_MAP = {}
 
-    for s in final_sectors:
+    for s in final_secs:
         key = SECTOR_LIST.get(s["sector"])
-        tag = "B" if s["bias"] == "BUY" else "S"
-        log("SECTOR", f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%")
+        log("SECTOR", f"{s['sector']} | BUY | {s['up_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = tag
+            STOCK_BIAS_MAP[sym] = "B"
             allowed_symbols.add(sym)
 
     selected = [s for s in all_selected if s in allowed_symbols]
     log("STOCKS", f"Selected={len(selected)}")
 
-    non_selected = set(ALL_SYMBOLS) - set(selected)
-    fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - set(selected)),
+        data_type="SymbolUpdate"
+    )
 
-    for s in non_selected:
-        candles.pop(s, None)
-        last_cum_vol.pop(s, None)
-        volume_history.pop(s, None)
-
-    log("SYSTEM", f"History window = {fmt_ist(BT_FLOOR_TS-600)}→{fmt_ist(BT_FLOOR_TS)} IST")
+    log("SYSTEM", f"History window {fmt_ist(BT_FLOOR_TS-600)} → {fmt_ist(BT_FLOOR_TS)}")
 
     for s in selected:
         volume_history.setdefault(s, [])
         for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
             if i < 2:
                 volume_history[s].append(v)
-                log_render(f"HISTORY | {s} | {fmt_ist(ts)} | O={o} H={h} L={l} C={c} V={v}")
+                log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-    log("SYSTEM", "History COMPLETE (C1, C2 only)")
+    log("SYSTEM", "History loaded")
 
 threading.Thread(target=controller, daemon=True).start()
 
@@ -336,8 +319,7 @@ def health():
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
-    code = request.args.get("code") or request.args.get("auth_code")
-    log("SYSTEM", f"FYERS redirect | code={code}")
+    log("SYSTEM", "FYERS redirect")
     return jsonify({"status": "ok"})
 
 # ============================================================
