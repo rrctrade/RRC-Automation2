@@ -99,10 +99,10 @@ def run_sector_bias():
         bias = None
 
         # ✅ FIX: allow both BUY and SELL sectors
-        if up_pct >= 80:
+        if up_pct >= 60:
             bias = "BUY"
 
-        if down_pct >= 80:
+        if down_pct >= 60:
             bias = "SELL"
 
         if not bias:
