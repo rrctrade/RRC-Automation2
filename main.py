@@ -1,7 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-2A : Signal Candle → Immediate SL-M Trigger Order
-# TIME LOGIC FROM STABLE VERSION (DO NOT MODIFY)
 # ============================================================
 
 import os
@@ -77,7 +76,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL (STEP-2A + STABLE TIME LOGIC)")
+log("SYSTEM", "main.py FINAL (STEP-2A SL-M)")
 
 # ============================================================
 # SETTINGS
@@ -88,7 +87,7 @@ def get_settings():
 
 SETTINGS = get_settings()
 
-MODE = SETTINGS.get("MODE", "PAPER").upper()
+MODE = SETTINGS.get("MODE", "PAPER").upper()   # 🔴 NEW
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 PER_TRADE_RISK = int(SETTINGS.get("PER_TRADE_RISK", 0))
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
@@ -96,6 +95,9 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
 log("SETTINGS", f"MODE={MODE}")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
+log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
+log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
+log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
 # ============================================================
 # HELPERS
@@ -159,19 +161,35 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(vol)
     current_min[symbol] = min(volume_history[symbol])
 
-    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
+    if c["open"] > c["close"]:
+        color = "RED"
+    elif c["open"] < c["close"]:
+        color = "GREEN"
+    else:
+        color = "DOJI"
+
     bias_tag = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
-    log("VOLCHK",
+    log(
+        "VOLCHK",
         f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | "
         f"is_lowest={is_lowest} | {color} {bias_tag}"
     )
 
-    if label == "LIVE3" and bias_tag == "B" and color == "RED" and is_lowest:
+    # =====================================================
+    # STEP-2A : IMMEDIATE SL-M TRIGGER ORDER
+    # =====================================================
+    if (
+        label == "LIVE3"
+        and bias_tag == "B"
+        and color == "RED"
+        and is_lowest
+    ):
         log("SIGNAL", f"BUY_SIGNAL | {symbol} | LIVE3 | MODE={MODE}")
+
         place_signal_order(
             fyers=fyers,
             symbol=symbol,
@@ -259,8 +277,7 @@ def controller():
     while datetime.now(UTC) < bias_dt:
         time.sleep(1)
 
-    # 🔒 STABLE TIME LOGIC (DO NOT CHANGE)
-    BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp())) + CANDLE_INTERVAL
+    BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
 
     log("BIAS", "Sector bias check started")
     res = run_sector_bias()
@@ -279,20 +296,26 @@ def controller():
 
     final_sectors = buy_sectors + sell_sectors
 
-    STOCK_BIAS_MAP = {}
-    allowed_keys = set()
+    allowed_sector_keys = set()
+    for s in final_sectors:
+        key = SECTOR_LIST.get(s["sector"])
+        if key:
+            allowed_sector_keys.add(key)
+        log("SECTOR", f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%")
 
+    STOCK_BIAS_MAP = {}
     for s in final_sectors:
         key = SECTOR_LIST.get(s["sector"])
         tag = "B" if s["bias"] == "BUY" else "S"
-        if key:
-            allowed_keys.add(key)
-            for sym in SECTOR_MAP.get(key, []):
-                STOCK_BIAS_MAP[sym] = tag
-        log("SECTOR", f"{s['sector']} | {s['bias']} | ADV={s['up_pct']}% DEC={s['down_pct']}%")
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = tag
 
-    allowed_symbols = {s for k in allowed_keys for s in SECTOR_MAP.get(k, [])}
+    allowed_symbols = set()
+    for k in allowed_sector_keys:
+        allowed_symbols.update(SECTOR_MAP.get(k, []))
+
     selected = [s for s in all_selected if s in allowed_symbols]
+    log("STOCKS", f"Selected={len(selected)}")
 
     non_selected = set(ALL_SYMBOLS) - set(selected)
     fyers_ws.unsubscribe(symbols=list(non_selected), data_type="SymbolUpdate")
