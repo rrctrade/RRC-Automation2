@@ -1,7 +1,9 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-2A + STEP-2B-A
-# BUY + SELL BIAS | CLEAN WS UNSUBSCRIBE | ACTIVE SYMBOL GATE
+# LOWEST + SIGNAL NUMBERING
+# BUY + SELL BIAS
+# CLEAN LOG RESET
 # ============================================================
 
 import os
@@ -56,9 +58,23 @@ def log(level, msg):
     try:
         requests.post(
             WEBAPP_URL,
-            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
+            json={
+                "action": "pushLog",
+                "payload": {"level": level, "message": msg}
+            },
             timeout=3
         )
+    except Exception:
+        pass
+
+def clear_logs(reason):
+    try:
+        requests.post(
+            WEBAPP_URL,
+            json={"action": "clearLogs"},
+            timeout=5
+        )
+        print(f"LOGS CLEARED : {reason}", flush=True)
     except Exception:
         pass
 
@@ -66,14 +82,11 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 # ============================================================
-# CLEAR LOGS ON DEPLOY
+# CLEAR LOGS – DEPLOY LEVEL (1st TIME)
 # ============================================================
-try:
-    requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
-except Exception:
-    pass
+clear_logs("DEPLOY_START")
 
-log("SYSTEM", "main.py FINAL – ACTIVE SYMBOL CONTROL")
+log("SYSTEM", "main.py FINAL – LOWEST + SIGNAL NUMBERING")
 
 # ============================================================
 # SETTINGS
@@ -92,6 +105,7 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
 log("SETTINGS", f"MODE={MODE}")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
+log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
 log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
 log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
@@ -128,11 +142,13 @@ def fetch_two_history_candles(symbol, end_ts):
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
-ACTIVE_SYMBOLS = set()     # 🔒 FINAL authority
+ACTIVE_SYMBOLS = set()
 candles = {}
 last_cum_vol = {}
 volume_history = {}
+
 lowest_counter = {}
+signal_counter = {}
 
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
@@ -155,7 +171,13 @@ def close_live_candle(symbol, c):
     is_lowest = prev_min is not None and vol < prev_min
     volume_history.setdefault(symbol, []).append(vol)
 
-    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
+    if c["open"] > c["close"]:
+        color = "RED"
+    elif c["open"] < c["close"]:
+        color = "GREEN"
+    else:
+        color = "DOJI"
+
     bias_tag = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
@@ -167,18 +189,28 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias_tag}"
     )
 
+    # ---------------- LOWEST NUMBERING ----------------
     if is_lowest:
-        cnt = lowest_counter.get(symbol, 0) + 1
-        lowest_counter[symbol] = cnt
+        lc = lowest_counter.get(symbol, 0) + 1
+        lowest_counter[symbol] = lc
+
         log(
             "LOWEST",
-            f"{symbol} | {label} | LOWEST#{cnt} | "
+            f"{symbol} | {label} | LOWEST#{lc} | "
             f"vol={vol} | prev_min={prev_min} | {color} {bias_tag}"
         )
 
-    # BUY SIGNAL (unchanged)
+    # ---------------- SIGNAL NUMBERING (BUY ONLY) ----------------
     if label == "LIVE3" and bias_tag == "B" and color == "RED" and is_lowest:
-        log("SIGNAL", f"BUY_SIGNAL | {symbol} | LIVE3")
+        sc = signal_counter.get(symbol, 0) + 1
+        signal_counter[symbol] = sc
+
+        log(
+            "SIGNAL",
+            f"{symbol} | {label} | SIGNAL#{sc} | BUY | "
+            f"{color} {bias_tag}"
+        )
+
         place_signal_order(
             fyers=fyers,
             symbol=symbol,
@@ -196,7 +228,6 @@ def close_live_candle(symbol, c):
 def update_candle(msg):
     symbol = msg.get("symbol")
 
-    # 🔒 HARD FILTER
     if ACTIVE_SYMBOLS and symbol not in ACTIVE_SYMBOLS:
         return
 
@@ -261,6 +292,9 @@ threading.Thread(target=start_ws, daemon=True).start()
 def controller():
     global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS
 
+    # 🔴 CLEAR LOGS AGAIN – BEFORE STRATEGY START
+    clear_logs("BEFORE_BIAS")
+
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
@@ -287,7 +321,7 @@ def controller():
         reverse=True
     )[:SELL_SECTOR_COUNT]
 
-    allowed_symbols = set()
+    allowed = set()
     STOCK_BIAS_MAP = {}
 
     for s in buy_secs:
@@ -295,20 +329,19 @@ def controller():
         log("SECTOR", f"{s['sector']} | BUY | {s['up_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
-            allowed_symbols.add(sym)
+            allowed.add(sym)
 
     for s in sell_secs:
         key = SECTOR_LIST.get(s["sector"])
         log("SECTOR", f"{s['sector']} | SELL | {s['down_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
-            allowed_symbols.add(sym)
+            allowed.add(sym)
 
-    selected = [s for s in all_selected if s in allowed_symbols]
-    ACTIVE_SYMBOLS = set(selected)
+    ACTIVE_SYMBOLS = set([s for s in all_selected if s in allowed])
 
     log("STOCKS", f"Selected={len(ACTIVE_SYMBOLS)}")
-    log("SYSTEM", f"ACTIVE_SYMBOLS locked = {len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", f"ACTIVE_SYMBOLS locked")
 
     fyers_ws.unsubscribe(
         symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
