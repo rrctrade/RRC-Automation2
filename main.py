@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-2A + STEP-2B-A : LOWEST VOLUME NUMBERED LOG
+# BUY + SELL SECTOR ENABLED (SETTINGS DRIVEN)
 # ============================================================
 
 import os
@@ -9,7 +10,7 @@ import threading
 import requests
 from datetime import datetime
 import pytz
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -23,7 +24,7 @@ from signal_candle_order import place_signal_order
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
-CANDLE_INTERVAL = 300  # 5 min
+CANDLE_INTERVAL = 300
 
 # ============================================================
 # ENV
@@ -72,7 +73,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL STEP-2A + LOWEST NUMBERING")
+log("SYSTEM", "main.py FINAL STEP-2A + LOWEST NUMBERING (BUY+SELL)")
 
 # ============================================================
 # SETTINGS
@@ -92,6 +93,8 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 log("SETTINGS", f"MODE={MODE}")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
 log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
+log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
+log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
 # ============================================================
 # TIME HELPERS
@@ -133,7 +136,6 @@ volume_history = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
-# 🔴 NEW : lowest volume counter per symbol
 lowest_counter = {}
 
 # ============================================================
@@ -172,22 +174,17 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias_tag}"
     )
 
-    # =====================================================
-    # STEP-2B-A : LOWEST VOLUME EVENT (NUMBERED, LOG ONLY)
-    # =====================================================
+    # LOWEST LOG
     if is_lowest:
         cnt = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = cnt
-
         log(
             "LOWEST",
             f"{symbol} | {label} | LOWEST#{cnt} | "
             f"vol={vol} | prev_min={prev_min} | {color} {bias_tag}"
         )
 
-    # =====================================================
-    # STEP-2A BUY SIGNAL (UNCHANGED)
-    # =====================================================
+    # BUY SIGNAL (unchanged)
     if (
         label == "LIVE3"
         and bias_tag == "B"
@@ -293,6 +290,12 @@ def controller():
         reverse=True
     )[:BUY_SECTOR_COUNT]
 
+    sell_secs = sorted(
+        [s for s in strong if s["bias"] == "SELL"],
+        key=lambda x: x["down_pct"],
+        reverse=True
+    )[:SELL_SECTOR_COUNT]
+
     allowed_symbols = set()
     STOCK_BIAS_MAP = {}
 
@@ -301,6 +304,13 @@ def controller():
         log("SECTOR", f"{s['sector']} | BUY | {s['up_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
+            allowed_symbols.add(sym)
+
+    for s in sell_secs:
+        key = SECTOR_LIST.get(s["sector"])
+        log("SECTOR", f"{s['sector']} | SELL | {s['down_pct']}%")
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "S"
             allowed_symbols.add(sym)
 
     selected = [s for s in all_selected if s in allowed_symbols]
