@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-2A + STEP-2B-A : LOWEST VOLUME NUMBERED LOG
-# BUY + SELL SECTOR ENABLED (SETTINGS DRIVEN)
+# STEP-2A + STEP-2B-A
+# BUY + SELL BIAS | CLEAN WS UNSUBSCRIBE | ACTIVE SYMBOL GATE
 # ============================================================
 
 import os
@@ -73,7 +73,7 @@ try:
 except Exception:
     pass
 
-log("SYSTEM", "main.py FINAL STEP-2A + LOWEST NUMBERING (BUY+SELL)")
+log("SYSTEM", "main.py FINAL – ACTIVE SYMBOL CONTROL")
 
 # ============================================================
 # SETTINGS
@@ -92,7 +92,6 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
 log("SETTINGS", f"MODE={MODE}")
 log("SETTINGS", f"BIAS_TIME={BIAS_TIME_STR}")
-log("SETTINGS", f"PER_TRADE_RISK={PER_TRADE_RISK}")
 log("SETTINGS", f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT}")
 log("SETTINGS", f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT}")
 
@@ -129,14 +128,14 @@ def fetch_two_history_candles(symbol, end_ts):
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
+ACTIVE_SYMBOLS = set()     # 🔒 FINAL authority
 candles = {}
 last_cum_vol = {}
 volume_history = {}
+lowest_counter = {}
 
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
-
-lowest_counter = {}
 
 # ============================================================
 # CLOSE CANDLE
@@ -156,13 +155,7 @@ def close_live_candle(symbol, c):
     is_lowest = prev_min is not None and vol < prev_min
     volume_history.setdefault(symbol, []).append(vol)
 
-    if c["open"] > c["close"]:
-        color = "RED"
-    elif c["open"] < c["close"]:
-        color = "GREEN"
-    else:
-        color = "DOJI"
-
+    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias_tag = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
@@ -174,7 +167,6 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias_tag}"
     )
 
-    # LOWEST LOG
     if is_lowest:
         cnt = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = cnt
@@ -185,14 +177,8 @@ def close_live_candle(symbol, c):
         )
 
     # BUY SIGNAL (unchanged)
-    if (
-        label == "LIVE3"
-        and bias_tag == "B"
-        and color == "RED"
-        and is_lowest
-    ):
+    if label == "LIVE3" and bias_tag == "B" and color == "RED" and is_lowest:
         log("SIGNAL", f"BUY_SIGNAL | {symbol} | LIVE3")
-
         place_signal_order(
             fyers=fyers,
             symbol=symbol,
@@ -205,15 +191,20 @@ def close_live_candle(symbol, c):
         )
 
 # ============================================================
-# UPDATE CANDLE
+# UPDATE CANDLE (ACTIVE SYMBOL GATE)
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
+
+    # 🔒 HARD FILTER
+    if ACTIVE_SYMBOLS and symbol not in ACTIVE_SYMBOLS:
+        return
+
     ltp = msg.get("ltp")
     vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
 
-    if not symbol or ltp is None or vol is None or ts is None:
+    if ltp is None or vol is None or ts is None:
         return
 
     start = candle_start(ts)
@@ -268,7 +259,7 @@ threading.Thread(target=start_ws, daemon=True).start()
 # CONTROLLER
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, STOCK_BIAS_MAP
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
@@ -314,23 +305,26 @@ def controller():
             allowed_symbols.add(sym)
 
     selected = [s for s in all_selected if s in allowed_symbols]
-    log("STOCKS", f"Selected={len(selected)}")
+    ACTIVE_SYMBOLS = set(selected)
+
+    log("STOCKS", f"Selected={len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", f"ACTIVE_SYMBOLS locked = {len(ACTIVE_SYMBOLS)}")
 
     fyers_ws.unsubscribe(
-        symbols=list(set(ALL_SYMBOLS) - set(selected)),
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
         data_type="SymbolUpdate"
     )
 
     log("SYSTEM", f"History window {fmt_ist(BT_FLOOR_TS-600)} → {fmt_ist(BT_FLOOR_TS)}")
 
-    for s in selected:
+    for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
         for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
             if i < 2:
                 volume_history[s].append(v)
                 log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-    log("SYSTEM", "History loaded")
+    log("SYSTEM", "History loaded – ACTIVE SYMBOLS ONLY")
 
 threading.Thread(target=controller, daemon=True).start()
 
