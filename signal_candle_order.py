@@ -1,6 +1,6 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-3B-1 : Pending Order Cancel / Replace Logic
+# STEP-3C : PAPER Execution Detection + Freeze
 # ============================================================
 
 from math import floor, ceil
@@ -8,13 +8,20 @@ from math import floor, ceil
 # ------------------------------------------------------------
 # ORDER STATE (authoritative, in-memory)
 # ------------------------------------------------------------
-ORDER_STATE = {}
 # symbol -> {
 #   status: NONE / PENDING / EXECUTED
 #   side: BUY / SELL
 #   trigger: float
 #   signal_no: int
 # }
+ORDER_STATE = {}
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+def is_frozen(symbol):
+    state = ORDER_STATE.get(symbol)
+    return state and state.get("status") == "EXECUTED"
 
 # ------------------------------------------------------------
 # QUANTITY CALCULATION
@@ -23,7 +30,6 @@ def calculate_quantity(high, low, per_trade_risk):
     candle_range = abs(high - low)
     if candle_range <= 0:
         return 0, candle_range
-
     qty = floor(per_trade_risk / candle_range)
     return qty, candle_range
 
@@ -49,7 +55,7 @@ def cancel_pending_order(
 
     if mode == "LIVE":
         try:
-            # NOTE: real order id handling will come later
+            # real order id handling will come later
             fyers.cancel_order({"symbol": symbol})
         except Exception as e:
             log_fn(f"LIVE_CANCEL_ERROR | {symbol} | {e}")
@@ -86,18 +92,6 @@ def place_signal_order(
         trigger_price = floor(low * 0.9995)
         txn_type = -1
 
-    order_payload = {
-        "symbol": symbol,
-        "qty": qty,
-        "type": 3,  # STOP-MARKET
-        "side": txn_type,
-        "productType": "INTRADAY",
-        "stopPrice": trigger_price,
-        "validity": "DAY",
-        "disclosedQty": 0,
-        "offlineOrder": False,
-    }
-
     log_fn(
         f"ORDER_SIGNAL | {symbol} | {side} | "
         f"trigger={trigger_price} qty={qty} "
@@ -110,7 +104,17 @@ def place_signal_order(
         )
     else:
         try:
-            fyers.place_order(order_payload)
+            fyers.place_order({
+                "symbol": symbol,
+                "qty": qty,
+                "type": 3,
+                "side": txn_type,
+                "productType": "INTRADAY",
+                "stopPrice": trigger_price,
+                "validity": "DAY",
+                "disclosedQty": 0,
+                "offlineOrder": False,
+            })
             log_fn(f"LIVE_TRIGGER_ORDER_PLACED | {symbol}")
         except Exception as e:
             log_fn(f"LIVE_ORDER_ERROR | {symbol} | {e}")
@@ -124,7 +128,7 @@ def place_signal_order(
     }
 
 # ------------------------------------------------------------
-# HANDLE NEW SIGNAL (STEP-3B-1 ENTRY POINT)
+# HANDLE SIGNAL EVENT
 # ------------------------------------------------------------
 def handle_signal_event(
     *,
@@ -138,9 +142,13 @@ def handle_signal_event(
     signal_no,
     log_fn
 ):
+    # FREEZE GUARD
+    if is_frozen(symbol):
+        return
+
     state = ORDER_STATE.get(symbol)
 
-    # SIGNAL#1 → simple place
+    # SIGNAL#1
     if signal_no == 1:
         place_signal_order(
             fyers=fyers,
@@ -155,7 +163,7 @@ def handle_signal_event(
         )
         return
 
-    # SIGNAL#2+ → cancel + replace
+    # SIGNAL#2+
     if state and state.get("status") == "PENDING":
         cancel_pending_order(
             fyers=fyers,
@@ -178,7 +186,7 @@ def handle_signal_event(
     )
 
 # ------------------------------------------------------------
-# HANDLE LOWEST UPDATE (NO SIGNAL)
+# HANDLE LOWEST EVENT (NO SIGNAL)
 # ------------------------------------------------------------
 def handle_lowest_event(
     *,
@@ -187,6 +195,10 @@ def handle_lowest_event(
     mode,
     log_fn
 ):
+    # FREEZE GUARD
+    if is_frozen(symbol):
+        return
+
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "PENDING":
         cancel_pending_order(
@@ -198,9 +210,38 @@ def handle_lowest_event(
         )
 
 # ------------------------------------------------------------
+# HANDLE LTP EVENT (PAPER EXECUTION DETECTION)
+# ------------------------------------------------------------
+def handle_ltp_event(
+    *,
+    symbol,
+    ltp,
+    log_fn
+):
+    state = ORDER_STATE.get(symbol)
+    if not state or state.get("status") != "PENDING":
+        return
+
+    side = state["side"]
+    trigger = state["trigger"]
+
+    executed = (
+        (side == "BUY" and ltp >= trigger) or
+        (side == "SELL" and ltp <= trigger)
+    )
+
+    if executed:
+        ORDER_STATE[symbol]["status"] = "EXECUTED"
+        log_fn(
+            f"ORDER_EXECUTED | {symbol} | side={side} | "
+            f"trigger={trigger} | ltp={ltp} | MODE=PAPER"
+        )
+
+# ------------------------------------------------------------
 # EXPORTS
 # ------------------------------------------------------------
 __all__ = [
     "handle_signal_event",
     "handle_lowest_event",
+    "handle_ltp_event",
 ]
