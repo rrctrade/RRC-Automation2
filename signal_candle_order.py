@@ -1,26 +1,26 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-2A / STEP-2B : Signal Candle → SL-M Trigger Order
-# BUY only (SELL ready, not used yet)
+# STEP-3B-1 : Pending Order Cancel / Replace Logic
 # ============================================================
 
 from math import floor, ceil
 
 # ------------------------------------------------------------
-# STATE : one pending order per stock (in-memory guard)
+# ORDER STATE (authoritative, in-memory)
 # ------------------------------------------------------------
-PENDING_ORDERS = set()
+ORDER_STATE = {}
+# symbol -> {
+#   status: NONE / PENDING / EXECUTED
+#   side: BUY / SELL
+#   trigger: float
+#   signal_no: int
+# }
 
 # ------------------------------------------------------------
-# QUANTITY CALCULATION (FIXED – NO int() BUG)
+# QUANTITY CALCULATION
 # ------------------------------------------------------------
 def calculate_quantity(high, low, per_trade_risk):
-    """
-    Qty = PER_TRADE_RISK / (high - low)
-    Uses FLOAT range (IMPORTANT)
-    """
     candle_range = abs(high - low)
-
     if candle_range <= 0:
         return 0, candle_range
 
@@ -28,56 +28,68 @@ def calculate_quantity(high, low, per_trade_risk):
     return qty, candle_range
 
 # ------------------------------------------------------------
-# MAIN ORDER FUNCTION (AUTHORITATIVE)
+# CANCEL PENDING ORDER
+# ------------------------------------------------------------
+def cancel_pending_order(
+    *,
+    fyers,
+    symbol,
+    mode,
+    reason,
+    log_fn
+):
+    state = ORDER_STATE.get(symbol)
+
+    if not state or state.get("status") != "PENDING":
+        return
+
+    log_fn(
+        f"ORDER_CANCEL | {symbol} | reason={reason} | MODE={mode}"
+    )
+
+    if mode == "LIVE":
+        try:
+            # NOTE: real order id handling will come later
+            fyers.cancel_order({"symbol": symbol})
+        except Exception as e:
+            log_fn(f"LIVE_CANCEL_ERROR | {symbol} | {e}")
+
+    ORDER_STATE[symbol]["status"] = "NONE"
+
+# ------------------------------------------------------------
+# PLACE SIGNAL ORDER (SL-M)
 # ------------------------------------------------------------
 def place_signal_order(
     *,
     fyers,
     symbol,
-    side,              # "BUY" / "SELL"
+    side,
     high,
     low,
     per_trade_risk,
-    mode,              # "PAPER" / "LIVE"
+    mode,
+    signal_no,
     log_fn
 ):
-    """
-    Places SL-M (Stop-Market) trigger order.
-    Order stays pending until trigger price is crossed.
-    """
-
-    # --------------------------------------------------------
-    # GUARD : only one pending order per symbol
-    # --------------------------------------------------------
-    if symbol in PENDING_ORDERS:
-        log_fn(f"ORDER_SKIP | {symbol} | already pending")
-        return
-
     qty, candle_range = calculate_quantity(high, low, per_trade_risk)
 
     if qty <= 0:
         log_fn(
-            f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range, 4)}"
+            f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range,4)}"
         )
         return
 
-    # --------------------------------------------------------
-    # BUY / SELL MAPPING
-    # --------------------------------------------------------
     if side == "BUY":
-        trigger_price = ceil(high * 1.0005)   # buffer above high
-        txn_type = 1                          # BUY
+        trigger_price = ceil(high * 1.0005)
+        txn_type = 1
     else:
-        trigger_price = floor(low * 0.9995)   # buffer below low
-        txn_type = -1                         # SELL
+        trigger_price = floor(low * 0.9995)
+        txn_type = -1
 
-    # --------------------------------------------------------
-    # SL-M ORDER PAYLOAD (STOP-MARKET)
-    # --------------------------------------------------------
     order_payload = {
         "symbol": symbol,
         "qty": qty,
-        "type": 3,                 # STOP-MARKET
+        "type": 3,  # STOP-MARKET
         "side": txn_type,
         "productType": "INTRADAY",
         "stopPrice": trigger_price,
@@ -89,30 +101,106 @@ def place_signal_order(
     log_fn(
         f"ORDER_SIGNAL | {symbol} | {side} | "
         f"trigger={trigger_price} qty={qty} "
-        f"range={round(candle_range,4)} | MODE={mode}"
+        f"range={round(candle_range,4)} | SIGNAL#{signal_no} | MODE={mode}"
     )
 
-    # --------------------------------------------------------
-    # PAPER MODE
-    # --------------------------------------------------------
     if mode != "LIVE":
         log_fn(
             f"PAPER_TRIGGER_ORDER_PLACED | {symbol} | trigger={trigger_price}"
         )
-        PENDING_ORDERS.add(symbol)
+    else:
+        try:
+            fyers.place_order(order_payload)
+            log_fn(f"LIVE_TRIGGER_ORDER_PLACED | {symbol}")
+        except Exception as e:
+            log_fn(f"LIVE_ORDER_ERROR | {symbol} | {e}")
+            return
+
+    ORDER_STATE[symbol] = {
+        "status": "PENDING",
+        "side": side,
+        "trigger": trigger_price,
+        "signal_no": signal_no,
+    }
+
+# ------------------------------------------------------------
+# HANDLE NEW SIGNAL (STEP-3B-1 ENTRY POINT)
+# ------------------------------------------------------------
+def handle_signal_event(
+    *,
+    fyers,
+    symbol,
+    side,
+    high,
+    low,
+    per_trade_risk,
+    mode,
+    signal_no,
+    log_fn
+):
+    state = ORDER_STATE.get(symbol)
+
+    # SIGNAL#1 → simple place
+    if signal_no == 1:
+        place_signal_order(
+            fyers=fyers,
+            symbol=symbol,
+            side=side,
+            high=high,
+            low=low,
+            per_trade_risk=per_trade_risk,
+            mode=mode,
+            signal_no=signal_no,
+            log_fn=log_fn
+        )
         return
 
-    # --------------------------------------------------------
-    # LIVE MODE
-    # --------------------------------------------------------
-    try:
-        res = fyers.place_order(order_payload)
-        log_fn(f"LIVE_TRIGGER_ORDER_PLACED | {symbol} | {res}")
-        PENDING_ORDERS.add(symbol)
-    except Exception as e:
-        log_fn(f"LIVE_ORDER_ERROR | {symbol} | {e}")
+    # SIGNAL#2+ → cancel + replace
+    if state and state.get("status") == "PENDING":
+        cancel_pending_order(
+            fyers=fyers,
+            symbol=symbol,
+            mode=mode,
+            reason="CANCEL_SIGNAL_UPDATE",
+            log_fn=log_fn
+        )
+
+    place_signal_order(
+        fyers=fyers,
+        symbol=symbol,
+        side=side,
+        high=high,
+        low=low,
+        per_trade_risk=per_trade_risk,
+        mode=mode,
+        signal_no=signal_no,
+        log_fn=log_fn
+    )
 
 # ------------------------------------------------------------
-# EXPORT (RENDER SAFE)
+# HANDLE LOWEST UPDATE (NO SIGNAL)
 # ------------------------------------------------------------
-__all__ = ["place_signal_order"]
+def handle_lowest_event(
+    *,
+    fyers,
+    symbol,
+    mode,
+    log_fn
+):
+    state = ORDER_STATE.get(symbol)
+    if state and state.get("status") == "PENDING":
+        cancel_pending_order(
+            fyers=fyers,
+            symbol=symbol,
+            mode=mode,
+            reason="CANCEL_LOWEST_UPDATE",
+            log_fn=log_fn
+        )
+
+# ------------------------------------------------------------
+# EXPORTS
+# ------------------------------------------------------------
+__all__ = [
+    "handle_signal_event",
+    "handle_lowest_event",
+]
