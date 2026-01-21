@@ -1,7 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-2B : LOWEST + SIGNAL IDENTIFICATION (NUMBERED)
-# WITH IMMEDIATE UNSUBSCRIBE + RECONNECT SAFE + FYERS REDIRECT
+# STEP-3A : SIGNAL#1 → ORDER PLACE (PAPER)
 # ============================================================
 
 import os
@@ -17,6 +16,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
+from signal_candle_order import place_signal_order   # ✅ STEP-3A ADD
 
 # ============================================================
 # TIME
@@ -75,7 +75,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START")
+log("SYSTEM", "main.py STEP-3A DEPLOY START")
 
 # ============================================================
 # SETTINGS
@@ -89,6 +89,10 @@ SETTINGS = get_settings()
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
+
+# ✅ STEP-3A ADD
+PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
+MODE = SETTINGS.get("MODE", "PAPER")
 
 # ============================================================
 # TIME HELPERS
@@ -187,6 +191,23 @@ def close_live_candle(symbol, c):
             log("SIGNAL",
                 f"{symbol} | {label} | SIGNAL#{sc} | {bias}"
             )
+
+            # =================================================
+            # STEP-3A : PLACE ORDER ONLY ON SIGNAL#1
+            # =================================================
+            if sc == 1:
+                side = "BUY" if bias == "B" else "SELL"
+
+                place_signal_order(
+                    fyers=fyers,
+                    symbol=symbol,
+                    side=side,
+                    high=c["high"],
+                    low=c["low"],
+                    per_trade_risk=PER_TRADE_RISK,
+                    mode=MODE,
+                    log_fn=lambda m: log("ORDER", m)
+                )
 
 # ============================================================
 # UPDATE CANDLE
@@ -293,7 +314,6 @@ def controller():
     ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
-    # IMMEDIATE UNSUBSCRIBE
     fyers_ws.unsubscribe(
         symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
         data_type="SymbolUpdate"
@@ -313,7 +333,7 @@ def controller():
 threading.Thread(target=controller, daemon=True).start()
 
 # ============================================================
-# FLASK ROUTES (MANDATORY)
+# FLASK ROUTES
 # ============================================================
 @app.route("/")
 def health():
