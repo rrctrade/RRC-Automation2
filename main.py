@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-3B-1 : Cancel / Replace Pending Orders
+# STEP-3C : PAPER Execution Detection + Freeze
 # ============================================================
 
 import os
@@ -18,7 +18,8 @@ from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
-    handle_lowest_event
+    handle_lowest_event,
+    handle_ltp_event
 )
 
 # ============================================================
@@ -78,7 +79,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py STEP-3B-1 DEPLOY START")
+log("SYSTEM", "main.py STEP-3C DEPLOY START")
 
 # ============================================================
 # SETTINGS
@@ -175,7 +176,6 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
-    # ---------------- LOWEST ----------------
     if is_lowest:
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
@@ -192,7 +192,6 @@ def close_live_candle(symbol, c):
                 log_fn=lambda m: log("ORDER", m)
             )
 
-        # ---------------- SIGNAL ----------------
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
             signal_counter[symbol] = sc
@@ -216,7 +215,7 @@ def close_live_candle(symbol, c):
             )
 
 # ============================================================
-# UPDATE CANDLE
+# UPDATE CANDLE (TICK LEVEL)
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -230,6 +229,13 @@ def update_candle(msg):
 
     if ltp is None or vol is None or ts is None:
         return
+
+    # STEP-3C : PAPER EXECUTION CHECK (TICK LEVEL)
+    handle_ltp_event(
+        symbol=symbol,
+        ltp=ltp,
+        log_fn=lambda m: log("ORDER", m)
+    )
 
     start = candle_start(ts)
 
