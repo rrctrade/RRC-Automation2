@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-3A : SIGNAL#1 → ORDER PLACE (PAPER)
+# STEP-3B-1 : Cancel / Replace Pending Orders
 # ============================================================
 
 import os
@@ -16,14 +16,17 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
-from signal_candle_order import place_signal_order   # ✅ STEP-3A ADD
+from signal_candle_order import (
+    handle_signal_event,
+    handle_lowest_event
+)
 
 # ============================================================
 # TIME
 # ============================================================
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
-CANDLE_INTERVAL = 300  # 5 min
+CANDLE_INTERVAL = 300
 
 # ============================================================
 # ENV
@@ -75,7 +78,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py STEP-3A DEPLOY START")
+log("SYSTEM", "main.py STEP-3B-1 DEPLOY START")
 
 # ============================================================
 # SETTINGS
@@ -90,7 +93,6 @@ BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 
-# ✅ STEP-3A ADD
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
@@ -165,7 +167,6 @@ def close_live_candle(symbol, c):
     )
 
     bias = STOCK_BIAS_MAP.get(symbol, "")
-
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
@@ -174,7 +175,7 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
-    # ---------------- LOWEST NUMBERING ----------------
+    # ---------------- LOWEST ----------------
     if is_lowest:
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
@@ -183,7 +184,15 @@ def close_live_candle(symbol, c):
             f"{symbol} | {label} | LOWEST#{lc} | {color} {bias}"
         )
 
-        # ---------------- SIGNAL NUMBERING ----------------
+        if lc >= 2:
+            handle_lowest_event(
+                fyers=fyers,
+                symbol=symbol,
+                mode=MODE,
+                log_fn=lambda m: log("ORDER", m)
+            )
+
+        # ---------------- SIGNAL ----------------
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
             signal_counter[symbol] = sc
@@ -192,22 +201,19 @@ def close_live_candle(symbol, c):
                 f"{symbol} | {label} | SIGNAL#{sc} | {bias}"
             )
 
-            # =================================================
-            # STEP-3A : PLACE ORDER ONLY ON SIGNAL#1
-            # =================================================
-            if sc == 1:
-                side = "BUY" if bias == "B" else "SELL"
+            side = "BUY" if bias == "B" else "SELL"
 
-                place_signal_order(
-                    fyers=fyers,
-                    symbol=symbol,
-                    side=side,
-                    high=c["high"],
-                    low=c["low"],
-                    per_trade_risk=PER_TRADE_RISK,
-                    mode=MODE,
-                    log_fn=lambda m: log("ORDER", m)
-                )
+            handle_signal_event(
+                fyers=fyers,
+                symbol=symbol,
+                side=side,
+                high=c["high"],
+                low=c["low"],
+                per_trade_risk=PER_TRADE_RISK,
+                mode=MODE,
+                signal_no=sc,
+                log_fn=lambda m: log("ORDER", m)
+            )
 
 # ============================================================
 # UPDATE CANDLE
