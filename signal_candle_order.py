@@ -1,6 +1,6 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-3C : PAPER Execution Detection + Freeze
+# STEP-4B : ENTRY Execution → STOPLOSS Placement (CORRECTED)
 # ============================================================
 
 from math import floor, ceil
@@ -13,6 +13,9 @@ from math import floor, ceil
 #   side: BUY / SELL
 #   trigger: float
 #   signal_no: int
+#   qty: int
+#   signal_high: float
+#   signal_low: float
 # }
 ORDER_STATE = {}
 
@@ -34,7 +37,7 @@ def calculate_quantity(high, low, per_trade_risk):
     return qty, candle_range
 
 # ------------------------------------------------------------
-# CANCEL PENDING ORDER
+# CANCEL PENDING ENTRY ORDER
 # ------------------------------------------------------------
 def cancel_pending_order(
     *,
@@ -45,17 +48,13 @@ def cancel_pending_order(
     log_fn
 ):
     state = ORDER_STATE.get(symbol)
-
     if not state or state.get("status") != "PENDING":
         return
 
-    log_fn(
-        f"ORDER_CANCEL | {symbol} | reason={reason} | MODE={mode}"
-    )
+    log_fn(f"ORDER_CANCEL | {symbol} | reason={reason} | MODE={mode}")
 
     if mode == "LIVE":
         try:
-            # real order id handling will come later
             fyers.cancel_order({"symbol": symbol})
         except Exception as e:
             log_fn(f"LIVE_CANCEL_ERROR | {symbol} | {e}")
@@ -63,7 +62,7 @@ def cancel_pending_order(
     ORDER_STATE[symbol]["status"] = "NONE"
 
 # ------------------------------------------------------------
-# PLACE SIGNAL ORDER (SL-M)
+# PLACE ENTRY SIGNAL ORDER (SL-M)
 # ------------------------------------------------------------
 def place_signal_order(
     *,
@@ -78,11 +77,8 @@ def place_signal_order(
     log_fn
 ):
     qty, candle_range = calculate_quantity(high, low, per_trade_risk)
-
     if qty <= 0:
-        log_fn(
-            f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range,4)}"
-        )
+        log_fn(f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range,4)}")
         return
 
     if side == "BUY":
@@ -99,32 +95,28 @@ def place_signal_order(
     )
 
     if mode != "LIVE":
-        log_fn(
-            f"PAPER_TRIGGER_ORDER_PLACED | {symbol} | trigger={trigger_price}"
-        )
+        log_fn(f"PAPER_TRIGGER_ORDER_PLACED | {symbol} | trigger={trigger_price}")
     else:
-        try:
-            fyers.place_order({
-                "symbol": symbol,
-                "qty": qty,
-                "type": 3,
-                "side": txn_type,
-                "productType": "INTRADAY",
-                "stopPrice": trigger_price,
-                "validity": "DAY",
-                "disclosedQty": 0,
-                "offlineOrder": False,
-            })
-            log_fn(f"LIVE_TRIGGER_ORDER_PLACED | {symbol}")
-        except Exception as e:
-            log_fn(f"LIVE_ORDER_ERROR | {symbol} | {e}")
-            return
+        fyers.place_order({
+            "symbol": symbol,
+            "qty": qty,
+            "type": 3,  # SL-M
+            "side": txn_type,
+            "productType": "INTRADAY",
+            "stopPrice": trigger_price,
+            "validity": "DAY",
+            "offlineOrder": False,
+        })
+        log_fn(f"LIVE_TRIGGER_ORDER_PLACED | {symbol}")
 
     ORDER_STATE[symbol] = {
         "status": "PENDING",
         "side": side,
         "trigger": trigger_price,
         "signal_no": signal_no,
+        "qty": qty,
+        "signal_high": high,
+        "signal_low": low,
     }
 
 # ------------------------------------------------------------
@@ -142,13 +134,11 @@ def handle_signal_event(
     signal_no,
     log_fn
 ):
-    # FREEZE GUARD
     if is_frozen(symbol):
         return
 
     state = ORDER_STATE.get(symbol)
 
-    # SIGNAL#1
     if signal_no == 1:
         place_signal_order(
             fyers=fyers,
@@ -163,7 +153,6 @@ def handle_signal_event(
         )
         return
 
-    # SIGNAL#2+
     if state and state.get("status") == "PENDING":
         cancel_pending_order(
             fyers=fyers,
@@ -186,7 +175,7 @@ def handle_signal_event(
     )
 
 # ------------------------------------------------------------
-# HANDLE LOWEST EVENT (NO SIGNAL)
+# HANDLE LOWEST EVENT
 # ------------------------------------------------------------
 def handle_lowest_event(
     *,
@@ -195,7 +184,6 @@ def handle_lowest_event(
     mode,
     log_fn
 ):
-    # FREEZE GUARD
     if is_frozen(symbol):
         return
 
@@ -210,12 +198,62 @@ def handle_lowest_event(
         )
 
 # ------------------------------------------------------------
-# HANDLE LTP EVENT (PAPER EXECUTION DETECTION)
+# PLACE STOPLOSS ORDER (CORRECTED)
+# ------------------------------------------------------------
+def place_stoploss_order(
+    *,
+    fyers,
+    symbol,
+    mode,
+    log_fn
+):
+    state = ORDER_STATE.get(symbol)
+    if not state:
+        return
+
+    side = state["side"]
+    qty = state["qty"]
+
+    # 🔴 BUY entry → SELL SL-M at LOW
+    if side == "BUY":
+        sl_trigger = state["signal_low"]
+        sl_side = -1   # SELL
+    # 🔵 SELL entry → BUY SL-M at HIGH
+    else:
+        sl_trigger = state["signal_high"]
+        sl_side = 1    # BUY
+
+    log_fn(
+        f"SL_ORDER_SIGNAL | {symbol} | "
+        f"entry_side={side} | SL={sl_trigger} | MODE={mode}"
+    )
+
+    if mode != "LIVE":
+        log_fn(f"PAPER_SL_ORDER_PLACED | {symbol} | SL={sl_trigger}")
+        return
+
+    fyers.place_order({
+        "symbol": symbol,
+        "qty": qty,
+        "type": 3,          # SL-M
+        "side": sl_side,
+        "productType": "INTRADAY",
+        "stopPrice": sl_trigger,
+        "validity": "DAY",
+        "offlineOrder": False,
+    })
+
+    log_fn(f"LIVE_SL_ORDER_PLACED | {symbol} | SL={sl_trigger}")
+
+# ------------------------------------------------------------
+# HANDLE LTP EVENT (ENTRY EXECUTION ONLY)
 # ------------------------------------------------------------
 def handle_ltp_event(
     *,
+    fyers,
     symbol,
     ltp,
+    mode,
     log_fn
 ):
     state = ORDER_STATE.get(symbol)
@@ -232,9 +270,18 @@ def handle_ltp_event(
 
     if executed:
         ORDER_STATE[symbol]["status"] = "EXECUTED"
+
         log_fn(
             f"ORDER_EXECUTED | {symbol} | side={side} | "
-            f"trigger={trigger} | ltp={ltp} | MODE=PAPER"
+            f"trigger={trigger} | ltp={ltp} | MODE={mode}"
+        )
+
+        # ✅ IMMEDIATE STOPLOSS PLACEMENT
+        place_stoploss_order(
+            fyers=fyers,
+            symbol=symbol,
+            mode=mode,
+            log_fn=log_fn
         )
 
 # ------------------------------------------------------------
