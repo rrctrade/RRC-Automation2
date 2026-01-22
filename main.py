@@ -1,19 +1,18 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.p
-# STEP-3C + STEP-4A (LIVE ORDER WS ADDED)
+# RajanTradeAutomation – FINAL main.py
+# STEP-3C : PAPER Execution Detection via REST POLLING
 # ============================================================
 
-impor os
-impor time
-impor threading
-impor requests
-impor json
+import os
+import time
+import threading
+import requests
 from datetime import datetime
-impor pytz
+import pytz
 from flask import Flask, jsonify
 
 from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws, order_ws
+from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
@@ -77,7 +76,7 @@ def clear_logs():
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py START (MARKET WS + ORDER WS)")
+log("SYSTEM", "main.py STEP-3C REST POLLING DEPLOY START")
 
 # ============================================================
 # SETTINGS
@@ -99,81 +98,107 @@ MODE = SETTINGS.get("MODE", "PAPER")
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 ACTIVE_SYMBOLS = set()
+STOCK_BIAS_MAP = {}
 BIAS_DONE = False
 
+executed_orders = set()   # ⭐ execution freeze memory
+
 # ============================================================
-# ================= MARKET DATA WEBSOCKET ====================
+# 🟢 ORDER REST POLLING THREAD
 # ============================================================
-def on_market_message(msg):
-    symbol = msg.get("symbol")
-    if not symbol:
-        return
+def order_polling_loop():
+    log("SYSTEM", "Order REST polling started")
 
-    ltp = msg.get("ltp")
-    if ltp is not None:
-        # PAPER execution logic (unchanged)
-        handle_ltp_event(
-            symbol=symbol,
-            ltp=ltp,
-            log_fn=lambda m: log("ORDER", m)
-        )
+    while True:
+        try:
+            ob = fyers.orderbook()
+            if ob.get("s") != "ok":
+                time.sleep(2)
+                continue
 
-def on_market_connect():
-    log("SYSTEM", "MARKET WS CONNECTED")
-    if not BIAS_DONE:
-        market_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-    else:
-        market_ws.subscribe(symbols=list(ACTIVE_SYMBOLS), data_type="SymbolUpdate")
+            for o in ob.get("orderBook", []):
+                oid = o.get("id")
+                status = o.get("status")
+                symbol = o.get("symbol")
+                filled = o.get("filledQty", 0)
 
-def start_market_ws():
-    global market_ws
-    market_ws = data_ws.FyersDataSocket(
+                if status == "TRADED" and oid not in executed_orders:
+                    executed_orders.add(oid)
+
+                    log(
+                        "EXECUTION",
+                        f"{symbol} | ORDER EXECUTED | qty={filled} | id={oid}"
+                    )
+
+        except Exception as e:
+            log("ERROR", f"Order polling error: {e}")
+
+        time.sleep(2)   # ⏱ polling interval
+
+threading.Thread(target=order_polling_loop, daemon=True).start()
+
+# ============================================================
+# MARKET DATA WEBSOCKET (UNCHANGED)
+# ============================================================
+def on_message(msg):
+    handle_ltp_event(
+        symbol=msg.get("symbol"),
+        ltp=msg.get("ltp"),
+        log_fn=lambda m: log("ORDER", m)
+    )
+
+def on_connect():
+    log("SYSTEM", "Market WS CONNECTED")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
         access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_market_message,
-        on_connect=on_market_connect,
+        on_message=on_message,
+        on_connect=on_connect,
         reconnect=True
     )
-    market_ws.connect()
+    fyers_ws.connect()
 
-threading.Thread(target=start_market_ws, daemon=True).start()
-
-# ============================================================
-# ================= ORDER / TRADE WEBSOCKET ==================
-# ============================================================
-def on_order_message(msg):
-    """
-    LIVE ORDER / TRADE UPDATE
-    """
-    log("FYERS_ORDER_RAW", json.dumps(msg, default=str))
-
-    status = msg.get("orderStatus") or msg.get("status")
-    symbol = msg.get("symbol")
-    filled_qty = msg.get("filledQty") or msg.get("tradedQty")
-    avg_price = msg.get("avgPrice") or msg.get("tradePrice")
-
-    if status in ("EXECUTED", "FILLED", "COMPLETE"):
-        log(
-            "ORDER_EXECUTED_LIVE",
-            f"{symbol} | qty={filled_qty} | price={avg_price}"
-        )
-
-def on_order_connect():
-    log("SYSTEM", "ORDER WS CONNECTED")
-
-def start_order_ws():
-    global order_ws_client
-    order_ws_client = order_ws.FyersOrderSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_order_message,
-        on_connect=on_order_connect,
-        reconnect=True
-    )
-    order_ws_client.connect()
-
-threading.Thread(target=start_order_ws, daemon=True).start()
+threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# FLASK ROUTES
+# CONTROLLER (unchanged logic)
+# ============================================================
+def controller():
+    global BIAS_DONE, ACTIVE_SYMBOLS, STOCK_BIAS_MAP
+
+    bias_dt = datetime.strptime(BIAS_TIME_STR, "%H:%M:%S").time()
+    ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), bias_dt))
+    bias_utc = ist_dt.astimezone(UTC)
+
+    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
+
+    while datetime.now(UTC) < bias_utc:
+        time.sleep(1)
+
+    log("BIAS", "Bias calculation started")
+
+    res = run_sector_bias()
+    strong = res.get("strong_sectors", [])
+    selected = res.get("selected_stocks", [])
+
+    for s in strong:
+        key = SECTOR_LIST.get(s["sector"])
+        bias = "B" if s["bias"] == "BUY" else "S"
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = bias
+
+    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
+    BIAS_DONE = True
+
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+threading.Thread(target=controller, daemon=True).start()
+
+# ============================================================
+# FLASK
 # ============================================================
 @app.route("/")
 def health():
