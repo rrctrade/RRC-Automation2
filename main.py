@@ -1,12 +1,14 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-3C : PAPER Execution Detection + Freeze
+# (TEMP: FYERS RAW ORDER / TRADE PAYLOAD LOGGER ADDED)
 # ============================================================
 
 import os
 import time
 import threading
 import requests
+import json
 from datetime import datetime
 import pytz
 from flask import Flask, jsonify
@@ -79,7 +81,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py STEP-3C DEPLOY START")
+log("SYSTEM", "main.py STEP-3C DEPLOY START (RAW FYERS LOGGER ON)")
 
 # ============================================================
 # SETTINGS
@@ -230,7 +232,7 @@ def update_candle(msg):
     if ltp is None or vol is None or ts is None:
         return
 
-    # STEP-3C : PAPER EXECUTION CHECK (TICK LEVEL)
+    # PAPER EXECUTION CHECK
     handle_ltp_event(
         symbol=symbol,
         ltp=ltp,
@@ -267,7 +269,17 @@ def update_candle(msg):
 # WEBSOCKET
 # ============================================================
 def on_message(msg):
-    update_candle(msg)
+    try:
+        # 🔴 RAW FYERS PAYLOAD (ORDER / TRADE / ANY NON-TICK)
+        if not isinstance(msg, dict) or "symbol" not in msg:
+            log("FYERS_RAW", json.dumps(msg, default=str))
+            return
+
+        # Normal market tick
+        update_candle(msg)
+
+    except Exception as e:
+        log("FYERS_RAW_ERROR", str(e))
 
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
