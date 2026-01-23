@@ -1,6 +1,6 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-4B : ENTRY Execution → STOPLOSS Placement (CORRECTED)
+# STEP-4C : ENTRY → SL PLACE → SL EXECUTION (FINAL)
 # ============================================================
 
 from math import floor, ceil
@@ -9,13 +9,15 @@ from math import floor, ceil
 # ORDER STATE (authoritative, in-memory)
 # ------------------------------------------------------------
 # symbol -> {
-#   status: NONE / PENDING / EXECUTED
+#   status: NONE / PENDING / EXECUTED / SL_PLACED / SL_HIT
 #   side: BUY / SELL
 #   trigger: float
 #   signal_no: int
 #   qty: int
 #   signal_high: float
 #   signal_low: float
+#   sl_price: float
+#   sl_side: BUY / SELL
 # }
 ORDER_STATE = {}
 
@@ -24,7 +26,7 @@ ORDER_STATE = {}
 # ------------------------------------------------------------
 def is_frozen(symbol):
     state = ORDER_STATE.get(symbol)
-    return state and state.get("status") == "EXECUTED"
+    return state and state.get("status") == "SL_HIT"
 
 # ------------------------------------------------------------
 # QUANTITY CALCULATION
@@ -100,7 +102,7 @@ def place_signal_order(
         fyers.place_order({
             "symbol": symbol,
             "qty": qty,
-            "type": 3,  # SL-M
+            "type": 3,
             "side": txn_type,
             "productType": "INTRADAY",
             "stopPrice": trigger_price,
@@ -198,7 +200,7 @@ def handle_lowest_event(
         )
 
 # ------------------------------------------------------------
-# PLACE STOPLOSS ORDER (CORRECTED)
+# PLACE STOPLOSS ORDER
 # ------------------------------------------------------------
 def place_stoploss_order(
     *,
@@ -214,39 +216,42 @@ def place_stoploss_order(
     side = state["side"]
     qty = state["qty"]
 
-    # 🔴 BUY entry → SELL SL-M at LOW
+    # BUY entry → SELL SL at LOW
     if side == "BUY":
-        sl_trigger = state["signal_low"]
-        sl_side = -1   # SELL
-    # 🔵 SELL entry → BUY SL-M at HIGH
+        sl_price = state["signal_low"]
+        sl_side = "SELL"
+    # SELL entry → BUY SL at HIGH
     else:
-        sl_trigger = state["signal_high"]
-        sl_side = 1    # BUY
+        sl_price = state["signal_high"]
+        sl_side = "BUY"
+
+    state["sl_price"] = sl_price
+    state["sl_side"] = sl_side
+    state["status"] = "SL_PLACED"
 
     log_fn(
-        f"SL_ORDER_SIGNAL | {symbol} | "
-        f"entry_side={side} | SL={sl_trigger} | MODE={mode}"
+        f"SL_ORDER_SIGNAL | {symbol} | entry_side={side} | SL={sl_price} | MODE={mode}"
     )
 
     if mode != "LIVE":
-        log_fn(f"PAPER_SL_ORDER_PLACED | {symbol} | SL={sl_trigger}")
+        log_fn(f"PAPER_SL_ORDER_PLACED | {symbol} | SL={sl_price}")
         return
 
     fyers.place_order({
         "symbol": symbol,
         "qty": qty,
-        "type": 3,          # SL-M
-        "side": sl_side,
+        "type": 3,
+        "side": -1 if sl_side == "SELL" else 1,
         "productType": "INTRADAY",
-        "stopPrice": sl_trigger,
+        "stopPrice": sl_price,
         "validity": "DAY",
         "offlineOrder": False,
     })
 
-    log_fn(f"LIVE_SL_ORDER_PLACED | {symbol} | SL={sl_trigger}")
+    log_fn(f"LIVE_SL_ORDER_PLACED | {symbol} | SL={sl_price}")
 
 # ------------------------------------------------------------
-# HANDLE LTP EVENT (ENTRY EXECUTION ONLY)
+# HANDLE LTP EVENT (ENTRY + SL EXECUTION)
 # ------------------------------------------------------------
 def handle_ltp_event(
     *,
@@ -257,32 +262,52 @@ def handle_ltp_event(
     log_fn
 ):
     state = ORDER_STATE.get(symbol)
-    if not state or state.get("status") != "PENDING":
+    if not state:
         return
 
-    side = state["side"]
-    trigger = state["trigger"]
+    # ---------------- ENTRY EXECUTION ----------------
+    if state.get("status") == "PENDING":
+        side = state["side"]
+        trigger = state["trigger"]
 
-    executed = (
-        (side == "BUY" and ltp >= trigger) or
-        (side == "SELL" and ltp <= trigger)
-    )
-
-    if executed:
-        ORDER_STATE[symbol]["status"] = "EXECUTED"
-
-        log_fn(
-            f"ORDER_EXECUTED | {symbol} | side={side} | "
-            f"trigger={trigger} | ltp={ltp} | MODE={mode}"
+        executed = (
+            (side == "BUY" and ltp >= trigger) or
+            (side == "SELL" and ltp <= trigger)
         )
 
-        # ✅ IMMEDIATE STOPLOSS PLACEMENT
-        place_stoploss_order(
-            fyers=fyers,
-            symbol=symbol,
-            mode=mode,
-            log_fn=log_fn
+        if executed:
+            state["status"] = "EXECUTED"
+
+            log_fn(
+                f"ORDER_EXECUTED | {symbol} | side={side} | "
+                f"trigger={trigger} | ltp={ltp} | MODE={mode}"
+            )
+
+            place_stoploss_order(
+                fyers=fyers,
+                symbol=symbol,
+                mode=mode,
+                log_fn=log_fn
+            )
+        return
+
+    # ---------------- SL EXECUTION ----------------
+    if state.get("status") == "SL_PLACED":
+        sl_price = state["sl_price"]
+        sl_side = state["sl_side"]
+
+        sl_hit = (
+            (sl_side == "SELL" and ltp <= sl_price) or
+            (sl_side == "BUY" and ltp >= sl_price)
         )
+
+        if sl_hit:
+            state["status"] = "SL_HIT"
+
+            log_fn(
+                f"SL_EXECUTED | {symbol} | side={sl_side} | "
+                f"SL={sl_price} | ltp={ltp} | MODE={mode}"
+            )
 
 # ------------------------------------------------------------
 # EXPORTS
