@@ -230,10 +230,12 @@ def update_candle(msg):
     if ltp is None or vol is None or ts is None:
         return
 
-    # STEP-3C : PAPER EXECUTION CHECK (TICK LEVEL)
+    # ✅ FIXED handle_ltp_event call
     handle_ltp_event(
+        fyers=fyers,
         symbol=symbol,
         ltp=ltp,
+        mode=MODE,
         log_fn=lambda m: log("ORDER", m)
     )
 
@@ -309,6 +311,14 @@ def controller():
     res = run_sector_bias()
     strong = res.get("strong_sectors", [])
     all_selected = res.get("selected_stocks", [])
+
+    # 🔔 NEW: sector bias detail logs
+    for s in strong:
+        log(
+            "BIAS",
+            f"SECTOR={s['sector']} | {s['bias']} | "
+            f"up={s['up_pct']}% down={s['down_pct']}%"
+        )
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
