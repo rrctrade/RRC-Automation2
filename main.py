@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-3C : PAPER Execution Detection + Freeze
-# (HISTORY REPLACE + EARLY WS + FULL LIVE CANDLES)
+# (HISTORY REPLACE + EARLY WS + LIVE3 FIXED)
 # ============================================================
 
 import os
@@ -94,7 +94,6 @@ SETTINGS = get_settings()
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
-
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
@@ -135,7 +134,7 @@ ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
 
 candles = {}
-last_base_vol = {}          # 🔒 aligned ONLY at history-2 close / candle close
+last_base_vol = {}
 volume_history = {}
 
 lowest_counter = {}
@@ -145,7 +144,7 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# CLOSE LIVE CANDLE (PER-CANDLE VOLUME)
+# CLOSE LIVE CANDLE
 # ============================================================
 def close_live_candle(symbol, c):
     prev_base = last_base_vol.get(symbol)
@@ -333,8 +332,8 @@ def controller():
                 volume_history[s].append(v)
                 log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-                # 🔒 HISTORY-2 CLOSE DEFINES BASE FOR LIVE3
-                if i == 1:
+                # 🔒 Set base ONLY if LIVE3 not started yet
+                if i == 1 and s not in candles:
                     last_base_vol[s] = c
 
     log("SYSTEM", "History loaded – system LIVE")
