@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-3C : PAPER Execution Detection + Freeze
-# (PER-CANDLE VOLUME ONLY – PORTAL MATCHING)
+# (HISTORY REPLACE + EARLY WS + FULL LIVE CANDLES)
 # ============================================================
 
 import os
@@ -135,7 +135,7 @@ ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
 
 candles = {}
-last_base_vol = {}          # 🔒 ONLY BASE (NO CUMULATIVE LOGIC)
+last_base_vol = {}          # 🔒 aligned ONLY at history-2 close / candle close
 volume_history = {}
 
 lowest_counter = {}
@@ -145,12 +145,9 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# CLOSE CANDLE (PER-CANDLE VOLUME ONLY)
+# CLOSE LIVE CANDLE (PER-CANDLE VOLUME)
 # ============================================================
 def close_live_candle(symbol, c):
-    if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
-        return
-
     prev_base = last_base_vol.get(symbol)
     if prev_base is None:
         return
@@ -238,10 +235,6 @@ def update_candle(msg):
     )
 
     start = candle_start(ts)
-
-    if BT_FLOOR_TS and start == BT_FLOOR_TS and symbol not in last_base_vol:
-        last_base_vol[symbol] = base_vol
-
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
@@ -274,10 +267,8 @@ def on_connect():
 
     if not BIAS_DONE:
         fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-        log("SYSTEM", f"Subscribed ALL_SYMBOLS={len(ALL_SYMBOLS)}")
     else:
         fyers_ws.subscribe(symbols=list(ACTIVE_SYMBOLS), data_type="SymbolUpdate")
-        log("SYSTEM", f"Re-subscribed ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
 def start_ws():
     global fyers_ws
@@ -310,9 +301,6 @@ def controller():
     strong = res.get("strong_sectors", [])
     all_selected = res.get("selected_stocks", [])
 
-    for s in strong:
-        log("BIAS", f"SECTOR={s['sector']} | {s['bias']} | up={s['up_pct']}% down={s['down_pct']}%")
-
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
@@ -338,10 +326,16 @@ def controller():
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
-        for i, (ts,o,h,l,c,v) in enumerate(fetch_two_history_candles(s, BT_FLOOR_TS)):
+        history = fetch_two_history_candles(s, BT_FLOOR_TS)
+
+        for i, (ts,o,h,l,c,v) in enumerate(history):
             if i < 2:
                 volume_history[s].append(v)
                 log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+
+                # 🔒 HISTORY-2 CLOSE DEFINES BASE FOR LIVE3
+                if i == 1:
+                    last_base_vol[s] = c
 
     log("SYSTEM", "History loaded – system LIVE")
 
