@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-3C : PAPER Execution Detection + Freeze
+# (PER-CANDLE VOLUME ONLY – PORTAL MATCHING)
 # ============================================================
 
 import os
@@ -134,7 +135,7 @@ ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
 
 candles = {}
-last_cum_vol = {}
+last_base_vol = {}          # 🔒 ONLY BASE (NO CUMULATIVE LOGIC)
 volume_history = {}
 
 lowest_counter = {}
@@ -144,22 +145,22 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# CLOSE CANDLE
+# CLOSE CANDLE (PER-CANDLE VOLUME ONLY)
 # ============================================================
 def close_live_candle(symbol, c):
     if BT_FLOOR_TS is None or c["start"] < BT_FLOOR_TS:
         return
 
-    prev_cum = last_cum_vol.get(symbol)
-    if prev_cum is None:
+    prev_base = last_base_vol.get(symbol)
+    if prev_base is None:
         return
 
-    vol = c["cum_vol"] - prev_cum
-    last_cum_vol[symbol] = c["cum_vol"]
+    candle_vol = c["base_vol"] - prev_base
+    last_base_vol[symbol] = c["base_vol"]
 
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = prev_min is not None and vol < prev_min
-    volume_history.setdefault(symbol, []).append(vol)
+    is_lowest = prev_min is not None and candle_vol < prev_min
+    volume_history.setdefault(symbol, []).append(candle_vol)
 
     color = (
         "RED" if c["open"] > c["close"]
@@ -171,8 +172,10 @@ def close_live_candle(symbol, c):
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
-    log("VOLCHK",
-        f"{symbol} | {label} | vol={vol} | prev_min={prev_min} | "
+    log(
+        "VOLCHK",
+        f"{symbol} | {label} | vol={round(candle_vol,2)} | "
+        f"prev_min={round(prev_min,2) if prev_min is not None else 'NA'} | "
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
@@ -180,9 +183,7 @@ def close_live_candle(symbol, c):
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
 
-        log("LOWEST",
-            f"{symbol} | {label} | LOWEST#{lc} | {color} {bias}"
-        )
+        log("LOWEST", f"{symbol} | {label} | LOWEST#{lc} | {color} {bias}")
 
         if lc >= 2:
             handle_lowest_event(
@@ -196,9 +197,7 @@ def close_live_candle(symbol, c):
             sc = signal_counter.get(symbol, 0) + 1
             signal_counter[symbol] = sc
 
-            log("SIGNAL",
-                f"{symbol} | {label} | SIGNAL#{sc} | {bias}"
-            )
+            log("SIGNAL", f"{symbol} | {label} | SIGNAL#{sc} | {bias}")
 
             side = "BUY" if bias == "B" else "SELL"
 
@@ -224,13 +223,12 @@ def update_candle(msg):
         return
 
     ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
+    base_vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
 
-    if ltp is None or vol is None or ts is None:
+    if ltp is None or base_vol is None or ts is None:
         return
 
-    # ✅ FIXED handle_ltp_event call
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -241,8 +239,8 @@ def update_candle(msg):
 
     start = candle_start(ts)
 
-    if BT_FLOOR_TS and start == BT_FLOOR_TS and symbol not in last_cum_vol:
-        last_cum_vol[symbol] = vol
+    if BT_FLOOR_TS and start == BT_FLOOR_TS and symbol not in last_base_vol:
+        last_base_vol[symbol] = base_vol
 
     c = candles.get(symbol)
 
@@ -256,14 +254,14 @@ def update_candle(msg):
             "high": ltp,
             "low": ltp,
             "close": ltp,
-            "cum_vol": vol
+            "base_vol": base_vol
         }
         return
 
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
-    c["cum_vol"] = vol
+    c["base_vol"] = base_vol
 
 # ============================================================
 # WEBSOCKET
@@ -312,13 +310,8 @@ def controller():
     strong = res.get("strong_sectors", [])
     all_selected = res.get("selected_stocks", [])
 
-    # 🔔 NEW: sector bias detail logs
     for s in strong:
-        log(
-            "BIAS",
-            f"SECTOR={s['sector']} | {s['bias']} | "
-            f"up={s['up_pct']}% down={s['down_pct']}%"
-        )
+        log("BIAS", f"SECTOR={s['sector']} | {s['bias']} | up={s['up_pct']}% down={s['down_pct']}%")
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
