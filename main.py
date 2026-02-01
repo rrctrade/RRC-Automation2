@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-3C : PAPER Execution Detection + Freeze
-# (HISTORY REPLACE + EARLY WS + LIVE3 FIXED)
+# (HISTORY REPLACE + EARLY WS + LIVE3 WS-FIRST-BASE FIXED)
 # ============================================================
 
 import os
@@ -135,8 +135,9 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-volume_history = {}
+ws_base_seeded = set()      # ✅ NEW: LIVE3 WS base captured symbols
 
+volume_history = {}
 lowest_counter = {}
 signal_counter = {}
 
@@ -236,9 +237,22 @@ def update_candle(msg):
     start = candle_start(ts)
     c = candles.get(symbol)
 
+    # --------------------------------------------------------
+    # NEW CANDLE START
+    # --------------------------------------------------------
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
+
+        # ✅ LIVE3 WS-first-base capture (ONE TIME ONLY)
+        if start == BT_FLOOR_TS and symbol not in ws_base_seeded:
+            last_base_vol[symbol] = base_vol
+            ws_base_seeded.add(symbol)
+
+            log(
+                "SYSTEM",
+                f"{symbol} | LIVE3 WS BASE SET | base_vol={base_vol}"
+            )
 
         candles[symbol] = {
             "start": start,
@@ -250,6 +264,9 @@ def update_candle(msg):
         }
         return
 
+    # --------------------------------------------------------
+    # UPDATE CURRENT CANDLE
+    # --------------------------------------------------------
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
@@ -331,10 +348,6 @@ def controller():
             if i < 2:
                 volume_history[s].append(v)
                 log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
-
-                # 🔒 Set base ONLY if LIVE3 not started yet
-                if i == 1 and s not in candles:
-                    last_base_vol[s] = c
 
     log("SYSTEM", "History loaded – system LIVE")
 
