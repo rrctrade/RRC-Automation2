@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # STEP-3C : PAPER Execution Detection + Freeze
-# (HISTORY REPLACE + EARLY WS + LIVE3 WS-FIRST-BASE FIXED)
+# (HISTORY REPLACE + EARLY WS + LIVE3 WS-FIRST-BASE FINAL FIX)
 # ============================================================
 
 import os
@@ -80,7 +80,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py STEP-3C DEPLOY START")
+log("SYSTEM", "main.py FINAL DEPLOY START")
 
 # ============================================================
 # SETTINGS
@@ -135,7 +135,7 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-ws_base_seeded = set()      # ✅ NEW: LIVE3 WS base captured symbols
+ws_base_seeded = set()
 
 volume_history = {}
 lowest_counter = {}
@@ -172,15 +172,12 @@ def close_live_candle(symbol, c):
     log(
         "VOLCHK",
         f"{symbol} | {label} | vol={round(candle_vol,2)} | "
-        f"prev_min={round(prev_min,2) if prev_min is not None else 'NA'} | "
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
     if is_lowest:
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
-
-        log("LOWEST", f"{symbol} | {label} | LOWEST#{lc} | {color} {bias}")
 
         if lc >= 2:
             handle_lowest_event(
@@ -193,8 +190,6 @@ def close_live_candle(symbol, c):
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
             signal_counter[symbol] = sc
-
-            log("SIGNAL", f"{symbol} | {label} | SIGNAL#{sc} | {bias}")
 
             side = "BUY" if bias == "B" else "SELL"
 
@@ -235,24 +230,24 @@ def update_candle(msg):
     )
 
     start = candle_start(ts)
-    c = candles.get(symbol)
 
     # --------------------------------------------------------
-    # NEW CANDLE START
+    # 🔒 LIVE3 WS-FIRST-BASE CAPTURE (FIRST TICK AFTER BIAS)
     # --------------------------------------------------------
+    if (
+        BT_FLOOR_TS is not None and
+        start == BT_FLOOR_TS and
+        symbol not in ws_base_seeded
+    ):
+        last_base_vol[symbol] = base_vol
+        ws_base_seeded.add(symbol)
+        log("SYSTEM", f"{symbol} | LIVE3 WS BASE SET | base_vol={base_vol}")
+
+    c = candles.get(symbol)
+
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
-
-        # ✅ LIVE3 WS-first-base capture (ONE TIME ONLY)
-        if start == BT_FLOOR_TS and symbol not in ws_base_seeded:
-            last_base_vol[symbol] = base_vol
-            ws_base_seeded.add(symbol)
-
-            log(
-                "SYSTEM",
-                f"{symbol} | LIVE3 WS BASE SET | base_vol={base_vol}"
-            )
 
         candles[symbol] = {
             "start": start,
@@ -264,9 +259,6 @@ def update_candle(msg):
         }
         return
 
-    # --------------------------------------------------------
-    # UPDATE CURRENT CANDLE
-    # --------------------------------------------------------
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
@@ -280,7 +272,6 @@ def on_message(msg):
 
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
-
     if not BIAS_DONE:
         fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
     else:
@@ -343,11 +334,9 @@ def controller():
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
         history = fetch_two_history_candles(s, BT_FLOOR_TS)
-
-        for i, (ts,o,h,l,c,v) in enumerate(history):
-            if i < 2:
-                volume_history[s].append(v)
-                log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+        for ts, o, h, l, c, v in history[:2]:
+            volume_history[s].append(v)
+            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
