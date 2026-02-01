@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-3D : LIVE3 VOLUME FIX (HISTORY-2 END BASE)
+# STEP-3E : LIVE3 VOLUME FIX (STABLE & NON-STALLING)
 # ============================================================
 
 import os
@@ -59,8 +59,10 @@ def log(level, msg):
     try:
         requests.post(
             WEBAPP_URL,
-            json={"action": "pushLog",
-                  "payload": {"level": level, "message": msg}},
+            json={
+                "action": "pushLog",
+                "payload": {"level": level, "message": msg}
+            },
             timeout=3
         )
     except Exception:
@@ -79,7 +81,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (LIVE3 FIXED)")
+log("SYSTEM", "main.py FINAL DEPLOY START (LIVE3 FIX LOCKED)")
 
 # ============================================================
 # SETTINGS
@@ -134,6 +136,8 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
+
+# 🔑 holds History-2 END cumulative WS volume
 last_ws_base_before_bias = {}
 
 volume_history = {}
@@ -141,6 +145,7 @@ lowest_counter = {}
 signal_counter = {}
 
 BT_FLOOR_TS = None
+bias_ts = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
@@ -220,8 +225,8 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
-    # capture last WS cumulative volume BEFORE bias floor
-    if not BIAS_DONE and BT_FLOOR_TS and ts < BT_FLOOR_TS:
+    # 🔑 Capture cumulative WS volume BEFORE bias time
+    if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
     handle_ltp_event(
@@ -280,15 +285,17 @@ threading.Thread(target=start_ws, daemon=True).start()
 # CONTROLLER
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
+    bias_ts = int(bias_dt.timestamp())
+
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
-    while datetime.now(UTC) < bias_dt:
+    while datetime.now(UTC).timestamp() < bias_ts:
         time.sleep(1)
 
-    BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
+    BT_FLOOR_TS = floor_5min(bias_ts)
     log("BIAS", "Bias calculation started")
 
     res = run_sector_bias()
@@ -326,10 +333,10 @@ def controller():
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        # 🔑 FINAL FIX: LIVE3 base = History-2 END cumulative WS volume
+        # 🔑 FINAL: LIVE3 base = History-2 END cumulative WS volume
         if s in last_ws_base_before_bias:
             last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE3 BASE SET FROM HISTORY2 | base={last_base_vol[s]}")
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
