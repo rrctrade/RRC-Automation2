@@ -1,7 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STEP-3C : PAPER Execution Detection + Freeze
-# (HISTORY REPLACE + EARLY WS + LIVE3 WS-FIRST-BASE FINAL FIX)
+# STEP-3D : LIVE3 VOLUME FIX (HISTORY-2 END BASE)
 # ============================================================
 
 import os
@@ -80,7 +79,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START")
+log("SYSTEM", "main.py FINAL DEPLOY START (LIVE3 FIXED)")
 
 # ============================================================
 # SETTINGS
@@ -135,7 +134,7 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-ws_base_seeded = set()
+last_ws_base_before_bias = {}
 
 volume_history = {}
 lowest_counter = {}
@@ -221,6 +220,10 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
+    # capture last WS cumulative volume BEFORE bias floor
+    if not BIAS_DONE and BT_FLOOR_TS and ts < BT_FLOOR_TS:
+        last_ws_base_before_bias[symbol] = base_vol
+
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -230,19 +233,6 @@ def update_candle(msg):
     )
 
     start = candle_start(ts)
-
-    # --------------------------------------------------------
-    # 🔒 LIVE3 WS-FIRST-BASE CAPTURE (FIRST TICK AFTER BIAS)
-    # --------------------------------------------------------
-    if (
-        BT_FLOOR_TS is not None and
-        start == BT_FLOOR_TS and
-        symbol not in ws_base_seeded
-    ):
-        last_base_vol[symbol] = base_vol
-        ws_base_seeded.add(symbol)
-        log("SYSTEM", f"{symbol} | LIVE3 WS BASE SET | base_vol={base_vol}")
-
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
@@ -272,10 +262,7 @@ def on_message(msg):
 
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
-    if not BIAS_DONE:
-        fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-    else:
-        fyers_ws.subscribe(symbols=list(ACTIVE_SYMBOLS), data_type="SymbolUpdate")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
 
 def start_ws():
     global fyers_ws
@@ -333,10 +320,16 @@ def controller():
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
+
         history = fetch_two_history_candles(s, BT_FLOOR_TS)
         for ts, o, h, l, c, v in history[:2]:
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+
+        # 🔑 FINAL FIX: LIVE3 base = History-2 END cumulative WS volume
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET FROM HISTORY2 | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
