@@ -10,10 +10,8 @@ SECTOR_MAP = {
     "AUTO": [
        
         "NSE:EXIDEIND-EQ",
-        "NSE:BOSCHLTD-EQ",
-        "NSE:M&M-EQ",
         "NSE:SONACOMS-EQ",
-        "NSE:HEROMOTOCO-EQ",
+        
         
     ],
 
@@ -21,22 +19,19 @@ SECTOR_MAP = {
     "FINANCIAL_SERVICES": [
         "NSE:SHRIRAMFIN-EQ",
         "NSE:BSE-EQ",
-        "NSE:PFC-EQ",
+        
         
     ],
 
     # ===================== NIFTY FMCG ======================
     "FMCG": [
-        "NSE:VBL-EQ",
-        "NSE:RADICO-EQ",
-        "NSE:UNITDSPR-EQ",
+       "NSE:UNITDSPR-EQ",
         "NSE:UBL-EQ",
         
     ],
 
     # ===================== NIFTY IT ======================
     "IT": [
-        "NSE:PERSISTENT-EQ",
         "NSE:WIPRO-EQ",
         "NSE:INFY-EQ",
         
@@ -46,14 +41,13 @@ SECTOR_MAP = {
     "MEDIA": [
         "NSE:SUNTV-EQ",
         "NSE:ZEEL-EQ",
-        "NSE:NETWORK18-EQ",
+        
        
     ],
 
     # ===================== NIFTY METAL ======================
     "METAL": [
         "NSE:NATIONALUM-EQ",
-        "NSE:LLOYDSME-EQ",
         "NSE:HINDCOPPER-EQ",
         
     ],
@@ -61,7 +55,6 @@ SECTOR_MAP = {
     # ===================== NIFTY PHARMA ======================
     "PHARMA": [
         "NSE:PPLPHARMA-EQ",
-        "NSE:WOCKPHARMA-EQ",
         "NSE:AJANTPHARM-EQ",
         
     ],
@@ -70,7 +63,7 @@ SECTOR_MAP = {
     "PSU_BANK": [
         "NSE:PSB-EQ",
         "NSE:PNB-EQ",
-        "NSE:UCOBANK-EQ",
+       
        
     ],
 
@@ -78,22 +71,20 @@ SECTOR_MAP = {
     "PRIVATE_BANK": [
         "NSE:INDUSINDBK-EQ",
         "NSE:RBLBANK-EQ",
-        "NSE:ICICIBANK-EQ",
+        
         
     ],
 
     # ===================== NIFTY REALTY ======================
     "REALTY": [
         "NSE:ANANTRAJ-EQ",
-        "NSE:SOBHA-EQ",
-        "NSE:PHOENIXLTD-EQ",
+        
         
        
     ],
 
     # ===================== NIFTY CONSUMER DURABLES ======================
     "CONSUMER_DURABLES": [
-        "NSE:WHIRLPOOL-EQ",
         "NSE:CROMPTON-EQ",
         "NSE:VGUARD-EQ",
     
@@ -101,7 +92,6 @@ SECTOR_MAP = {
 
     # ===================== NIFTY OIL & GAS ======================
     "OIL_GAS": [
-        "NSE:GSPL-EQ",
         "NSE:BPCL-EQ",
         "NSE:GAIL-EQ",
       
@@ -111,8 +101,7 @@ SECTOR_MAP = {
     "FIN_SERVICES_EX_BANK": [
         "NSE:MCX-EQ",
         "NSE:SHRIRAMFIN-EQ",
-        "NSE:BSE-EQ",
-        "NSE:IRFC-EQ",
+        
       
        
     ],
@@ -121,14 +110,13 @@ SECTOR_MAP = {
     "CHEMICALS": [
         "NSE:SOLARINDS-EQ",
         "NSE:CHAMBLFERT-EQ",
-        "NSE:UPL-EQ",
-        "NSE:SUMICHEM-EQ",
+        
        
     ],
 
     # ===================== NIFTY 50 ======================
     "NIFTY50": [
-        "NSE:TRENT-EQ","NSE:SHRIRAMFIN-EQ","NSE:WIPRO-EQ","NSE:INFY-EQ",
+        "NSE:TRENT-EQ"
        
     ],
 
