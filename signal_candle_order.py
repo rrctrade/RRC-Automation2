@@ -1,6 +1,6 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-4C : ENTRY → SL PLACE → SL EXECUTION (FINAL)
+# STEP-4D : EXACT TRIGGER + 0.10% PAPER EXECUTION (LOCKED)
 # ============================================================
 
 from math import floor, ceil
@@ -8,17 +8,6 @@ from math import floor, ceil
 # ------------------------------------------------------------
 # ORDER STATE (authoritative, in-memory)
 # ------------------------------------------------------------
-# symbol -> {
-#   status: NONE / PENDING / EXECUTED / SL_PLACED / SL_HIT
-#   side: BUY / SELL
-#   trigger: float
-#   signal_no: int
-#   qty: int
-#   signal_high: float
-#   signal_low: float
-#   sl_price: float
-#   sl_side: BUY / SELL
-# }
 ORDER_STATE = {}
 
 # ------------------------------------------------------------
@@ -27,6 +16,22 @@ ORDER_STATE = {}
 def is_frozen(symbol):
     state = ORDER_STATE.get(symbol)
     return state and state.get("status") == "SL_HIT"
+
+
+def round_max(price):
+    """
+    Round price to nearest MAX round number
+    based on price scale.
+    """
+    if price >= 500:
+        unit = 1.0
+    elif price >= 100:
+        unit = 0.1
+    else:
+        unit = 0.05
+
+    return floor(price / unit) * unit
+
 
 # ------------------------------------------------------------
 # QUANTITY CALCULATION
@@ -37,6 +42,7 @@ def calculate_quantity(high, low, per_trade_risk):
         return 0, candle_range
     qty = floor(per_trade_risk / candle_range)
     return qty, candle_range
+
 
 # ------------------------------------------------------------
 # CANCEL PENDING ENTRY ORDER
@@ -63,6 +69,7 @@ def cancel_pending_order(
 
     ORDER_STATE[symbol]["status"] = "NONE"
 
+
 # ------------------------------------------------------------
 # PLACE ENTRY SIGNAL ORDER (SL-M)
 # ------------------------------------------------------------
@@ -83,11 +90,12 @@ def place_signal_order(
         log_fn(f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range,4)}")
         return
 
+    # 🔒 EXACT TRIGGER (NO BUFFER)
     if side == "BUY":
-        trigger_price = ceil(high * 1.0005)
+        trigger_price = high
         txn_type = 1
     else:
-        trigger_price = floor(low * 0.9995)
+        trigger_price = low
         txn_type = -1
 
     log_fn(
@@ -102,7 +110,7 @@ def place_signal_order(
         fyers.place_order({
             "symbol": symbol,
             "qty": qty,
-            "type": 3,
+            "type": 3,  # SL-M
             "side": txn_type,
             "productType": "INTRADAY",
             "stopPrice": trigger_price,
@@ -120,6 +128,7 @@ def place_signal_order(
         "signal_high": high,
         "signal_low": low,
     }
+
 
 # ------------------------------------------------------------
 # HANDLE SIGNAL EVENT
@@ -176,6 +185,7 @@ def handle_signal_event(
         log_fn=log_fn
     )
 
+
 # ------------------------------------------------------------
 # HANDLE LOWEST EVENT
 # ------------------------------------------------------------
@@ -199,6 +209,7 @@ def handle_lowest_event(
             log_fn=log_fn
         )
 
+
 # ------------------------------------------------------------
 # PLACE STOPLOSS ORDER
 # ------------------------------------------------------------
@@ -216,11 +227,9 @@ def place_stoploss_order(
     side = state["side"]
     qty = state["qty"]
 
-    # BUY entry → SELL SL at LOW
     if side == "BUY":
         sl_price = state["signal_low"]
         sl_side = "SELL"
-    # SELL entry → BUY SL at HIGH
     else:
         sl_price = state["signal_high"]
         sl_side = "BUY"
@@ -250,6 +259,7 @@ def place_stoploss_order(
 
     log_fn(f"LIVE_SL_ORDER_PLACED | {symbol} | SL={sl_price}")
 
+
 # ------------------------------------------------------------
 # HANDLE LTP EVENT (ENTRY + SL EXECUTION)
 # ------------------------------------------------------------
@@ -278,9 +288,19 @@ def handle_ltp_event(
         if executed:
             state["status"] = "EXECUTED"
 
+            exec_price = ltp
+
+            # 🔒 PAPER EXECUTION LOGIC (0.10%)
+            if mode != "LIVE":
+                buffer = trigger * 0.001
+                if side == "SELL":
+                    exec_price = round_max(trigger - buffer)
+                else:
+                    exec_price = round_max(trigger + buffer)
+
             log_fn(
                 f"ORDER_EXECUTED | {symbol} | side={side} | "
-                f"trigger={trigger} | ltp={ltp} | MODE={mode}"
+                f"trigger={trigger} | exec={exec_price} | MODE={mode}"
             )
 
             place_stoploss_order(
@@ -308,6 +328,7 @@ def handle_ltp_event(
                 f"SL_EXECUTED | {symbol} | side={sl_side} | "
                 f"SL={sl_price} | ltp={ltp} | MODE={mode}"
             )
+
 
 # ------------------------------------------------------------
 # EXPORTS
