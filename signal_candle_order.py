@@ -1,6 +1,6 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-4D : EXACT TRIGGER + 0.10% PAPER EXECUTION (LOCKED)
+# STEP-4E : RR-BASED TRAILING (1.5R → +200 LOCK)
 # ============================================================
 
 from math import floor, ceil
@@ -19,17 +19,12 @@ def is_frozen(symbol):
 
 
 def round_max(price):
-    """
-    Round price to nearest MAX round number
-    based on price scale.
-    """
     if price >= 500:
         unit = 1.0
     elif price >= 100:
         unit = 0.1
     else:
         unit = 0.05
-
     return floor(price / unit) * unit
 
 
@@ -90,7 +85,6 @@ def place_signal_order(
         log_fn(f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range,4)}")
         return
 
-    # 🔒 EXACT TRIGGER (NO BUFFER)
     if side == "BUY":
         trigger_price = high
         txn_type = 1
@@ -110,7 +104,7 @@ def place_signal_order(
         fyers.place_order({
             "symbol": symbol,
             "qty": qty,
-            "type": 3,  # SL-M
+            "type": 3,
             "side": txn_type,
             "productType": "INTRADAY",
             "stopPrice": trigger_price,
@@ -123,10 +117,12 @@ def place_signal_order(
         "status": "PENDING",
         "side": side,
         "trigger": trigger_price,
+        "entry_price": trigger_price,
         "signal_no": signal_no,
         "qty": qty,
         "signal_high": high,
         "signal_low": low,
+        "trail_done": False,
     }
 
 
@@ -187,30 +183,6 @@ def handle_signal_event(
 
 
 # ------------------------------------------------------------
-# HANDLE LOWEST EVENT
-# ------------------------------------------------------------
-def handle_lowest_event(
-    *,
-    fyers,
-    symbol,
-    mode,
-    log_fn
-):
-    if is_frozen(symbol):
-        return
-
-    state = ORDER_STATE.get(symbol)
-    if state and state.get("status") == "PENDING":
-        cancel_pending_order(
-            fyers=fyers,
-            symbol=symbol,
-            mode=mode,
-            reason="CANCEL_LOWEST_UPDATE",
-            log_fn=log_fn
-        )
-
-
-# ------------------------------------------------------------
 # PLACE STOPLOSS ORDER
 # ------------------------------------------------------------
 def place_stoploss_order(
@@ -261,7 +233,7 @@ def place_stoploss_order(
 
 
 # ------------------------------------------------------------
-# HANDLE LTP EVENT (ENTRY + SL EXECUTION)
+# HANDLE LTP EVENT (ENTRY + RR TRAILING + SL EXECUTION)
 # ------------------------------------------------------------
 def handle_ltp_event(
     *,
@@ -275,9 +247,11 @@ def handle_ltp_event(
     if not state:
         return
 
+    side = state["side"]
+    qty = state["qty"]
+
     # ---------------- ENTRY EXECUTION ----------------
-    if state.get("status") == "PENDING":
-        side = state["side"]
+    if state["status"] == "PENDING":
         trigger = state["trigger"]
 
         executed = (
@@ -289,14 +263,14 @@ def handle_ltp_event(
             state["status"] = "EXECUTED"
 
             exec_price = ltp
-
-            # 🔒 PAPER EXECUTION LOGIC (0.10%)
             if mode != "LIVE":
                 buffer = trigger * 0.001
                 if side == "SELL":
                     exec_price = round_max(trigger - buffer)
                 else:
                     exec_price = round_max(trigger + buffer)
+
+            state["entry_price"] = exec_price
 
             log_fn(
                 f"ORDER_EXECUTED | {symbol} | side={side} | "
@@ -311,8 +285,30 @@ def handle_ltp_event(
             )
         return
 
+    # ---------------- RR-BASED TRAILING ----------------
+    if state["status"] == "SL_PLACED" and not state["trail_done"]:
+        entry = state["entry_price"]
+
+        if side == "SELL":
+            profit = (entry - ltp) * qty
+        else:
+            profit = (ltp - entry) * qty
+
+        if profit >= 750:  # 1.5R
+            if side == "SELL":
+                new_sl = entry - (200 / qty)
+            else:
+                new_sl = entry + (200 / qty)
+
+            state["sl_price"] = new_sl
+            state["trail_done"] = True
+
+            log_fn(
+                f"RR_TRAIL | {symbol} | RR=1.5 | SL moved to {round(new_sl,2)} | LOCK=200"
+            )
+
     # ---------------- SL EXECUTION ----------------
-    if state.get("status") == "SL_PLACED":
+    if state["status"] == "SL_PLACED":
         sl_price = state["sl_price"]
         sl_side = state["sl_side"]
 
@@ -335,6 +331,5 @@ def handle_ltp_event(
 # ------------------------------------------------------------
 __all__ = [
     "handle_signal_event",
-    "handle_lowest_event",
     "handle_ltp_event",
 ]
