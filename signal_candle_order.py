@@ -1,24 +1,27 @@
 # ============================================================
 # signal_candle_order.py
-# STEP-4E : RR-BASED TRAILING (1.5R → +200 LOCK)
+# RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
+# LIVE + PAPER COMPATIBLE
 # ============================================================
 
-from math import floor, ceil
+from math import floor
 
 # ------------------------------------------------------------
-# ORDER STATE (authoritative, in-memory)
+# ORDER STATE
 # ------------------------------------------------------------
 ORDER_STATE = {}
+
+RR_PROFIT = 750        # 1.5R for ₹500 risk
+LOCK_PROFIT = 200
 
 # ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
 def is_frozen(symbol):
-    state = ORDER_STATE.get(symbol)
-    return state and state.get("status") == "SL_HIT"
+    return ORDER_STATE.get(symbol, {}).get("status") == "SL_HIT"
 
 
-def round_max(price):
+def round_price(price):
     if price >= 500:
         unit = 1.0
     elif price >= 100:
@@ -29,219 +32,115 @@ def round_max(price):
 
 
 # ------------------------------------------------------------
-# QUANTITY CALCULATION
+# QTY
 # ------------------------------------------------------------
-def calculate_quantity(high, low, per_trade_risk):
-    candle_range = abs(high - low)
-    if candle_range <= 0:
-        return 0, candle_range
-    qty = floor(per_trade_risk / candle_range)
-    return qty, candle_range
-
-
-# ------------------------------------------------------------
-# CANCEL PENDING ENTRY ORDER
-# ------------------------------------------------------------
-def cancel_pending_order(
-    *,
-    fyers,
-    symbol,
-    mode,
-    reason,
-    log_fn
-):
-    state = ORDER_STATE.get(symbol)
-    if not state or state.get("status") != "PENDING":
-        return
-
-    log_fn(f"ORDER_CANCEL | {symbol} | reason={reason} | MODE={mode}")
-
-    if mode == "LIVE":
-        try:
-            fyers.cancel_order({"symbol": symbol})
-        except Exception as e:
-            log_fn(f"LIVE_CANCEL_ERROR | {symbol} | {e}")
-
-    ORDER_STATE[symbol]["status"] = "NONE"
+def calc_qty(high, low, risk):
+    rng = abs(high - low)
+    if rng <= 0:
+        return 0
+    return floor(risk / rng)
 
 
 # ------------------------------------------------------------
-# PLACE ENTRY SIGNAL ORDER (SL-M)
+# PLACE ENTRY ORDER
 # ------------------------------------------------------------
 def place_signal_order(
-    *,
-    fyers,
-    symbol,
-    side,
-    high,
-    low,
-    per_trade_risk,
-    mode,
-    signal_no,
-    log_fn
+    *, fyers, symbol, side, high, low,
+    per_trade_risk, mode, signal_no, log_fn
 ):
-    qty, candle_range = calculate_quantity(high, low, per_trade_risk)
+    qty = calc_qty(high, low, per_trade_risk)
     if qty <= 0:
-        log_fn(f"ORDER_SKIP | {symbol} | qty=0 | range={round(candle_range,4)}")
+        log_fn(f"ORDER_SKIP | {symbol} | qty=0")
         return
 
-    if side == "BUY":
-        trigger_price = high
-        txn_type = 1
-    else:
-        trigger_price = low
-        txn_type = -1
+    trigger = high if side == "BUY" else low
+    txn = 1 if side == "BUY" else -1
 
     log_fn(
         f"ORDER_SIGNAL | {symbol} | {side} | "
-        f"trigger={trigger_price} qty={qty} "
-        f"range={round(candle_range,4)} | SIGNAL#{signal_no} | MODE={mode}"
+        f"trigger={trigger} qty={qty} | SIGNAL#{signal_no}"
     )
 
-    if mode != "LIVE":
-        log_fn(f"PAPER_TRIGGER_ORDER_PLACED | {symbol} | trigger={trigger_price}")
-    else:
+    if mode == "LIVE":
         fyers.place_order({
             "symbol": symbol,
             "qty": qty,
             "type": 3,
-            "side": txn_type,
+            "side": txn,
             "productType": "INTRADAY",
-            "stopPrice": trigger_price,
+            "stopPrice": trigger,
             "validity": "DAY",
             "offlineOrder": False,
         })
-        log_fn(f"LIVE_TRIGGER_ORDER_PLACED | {symbol}")
 
     ORDER_STATE[symbol] = {
         "status": "PENDING",
         "side": side,
-        "trigger": trigger_price,
-        "entry_price": trigger_price,
-        "signal_no": signal_no,
+        "trigger": trigger,
         "qty": qty,
         "signal_high": high,
         "signal_low": low,
+        "entry_price": None,
+        "sl_price": None,
+        "sl_order_id": None,
         "trail_done": False,
     }
 
 
 # ------------------------------------------------------------
-# HANDLE SIGNAL EVENT
+# HANDLE SIGNAL
 # ------------------------------------------------------------
-def handle_signal_event(
-    *,
-    fyers,
-    symbol,
-    side,
-    high,
-    low,
-    per_trade_risk,
-    mode,
-    signal_no,
-    log_fn
-):
+def handle_signal_event(**kwargs):
+    symbol = kwargs["symbol"]
     if is_frozen(symbol):
         return
-
-    state = ORDER_STATE.get(symbol)
-
-    if signal_no == 1:
-        place_signal_order(
-            fyers=fyers,
-            symbol=symbol,
-            side=side,
-            high=high,
-            low=low,
-            per_trade_risk=per_trade_risk,
-            mode=mode,
-            signal_no=signal_no,
-            log_fn=log_fn
-        )
-        return
-
-    if state and state.get("status") == "PENDING":
-        cancel_pending_order(
-            fyers=fyers,
-            symbol=symbol,
-            mode=mode,
-            reason="CANCEL_SIGNAL_UPDATE",
-            log_fn=log_fn
-        )
-
-    place_signal_order(
-        fyers=fyers,
-        symbol=symbol,
-        side=side,
-        high=high,
-        low=low,
-        per_trade_risk=per_trade_risk,
-        mode=mode,
-        signal_no=signal_no,
-        log_fn=log_fn
-    )
+    place_signal_order(**kwargs)
 
 
 # ------------------------------------------------------------
-# PLACE STOPLOSS ORDER
+# SL PLACE / CANCEL
 # ------------------------------------------------------------
-def place_stoploss_order(
-    *,
-    fyers,
-    symbol,
-    mode,
-    log_fn
-):
-    state = ORDER_STATE.get(symbol)
-    if not state:
-        return
-
+def place_sl(fyers, state, symbol, sl_price, mode, log_fn):
     side = state["side"]
     qty = state["qty"]
+    sl_side = -1 if side == "BUY" else 1
 
-    if side == "BUY":
-        sl_price = state["signal_low"]
-        sl_side = "SELL"
-    else:
-        sl_price = state["signal_high"]
-        sl_side = "BUY"
+    if mode == "LIVE":
+        resp = fyers.place_order({
+            "symbol": symbol,
+            "qty": qty,
+            "type": 3,
+            "side": sl_side,
+            "productType": "INTRADAY",
+            "stopPrice": round_price(sl_price),
+            "validity": "DAY",
+            "offlineOrder": False,
+        })
+        state["sl_order_id"] = resp.get("id")
 
     state["sl_price"] = sl_price
-    state["sl_side"] = sl_side
     state["status"] = "SL_PLACED"
 
-    log_fn(
-        f"SL_ORDER_SIGNAL | {symbol} | entry_side={side} | SL={sl_price} | MODE={mode}"
-    )
+    log_fn(f"SL_PLACED | {symbol} | SL={round(sl_price,2)} | MODE={mode}")
 
-    if mode != "LIVE":
-        log_fn(f"PAPER_SL_ORDER_PLACED | {symbol} | SL={sl_price}")
-        return
 
-    fyers.place_order({
-        "symbol": symbol,
-        "qty": qty,
-        "type": 3,
-        "side": -1 if sl_side == "SELL" else 1,
-        "productType": "INTRADAY",
-        "stopPrice": sl_price,
-        "validity": "DAY",
-        "offlineOrder": False,
-    })
-
-    log_fn(f"LIVE_SL_ORDER_PLACED | {symbol} | SL={sl_price}")
+def cancel_sl(fyers, state, symbol, mode, log_fn):
+    if mode == "LIVE" and state.get("sl_order_id"):
+        try:
+            fyers.cancel_order({"id": state["sl_order_id"]})
+            log_fn(f"SL_CANCELLED | {symbol}")
+        except Exception as e:
+            log_fn(f"SL_CANCEL_FAIL | {symbol} | {e}")
+            return False
+    state["sl_order_id"] = None
+    return True
 
 
 # ------------------------------------------------------------
-# HANDLE LTP EVENT (ENTRY + RR TRAILING + SL EXECUTION)
+# HANDLE LTP EVENT
 # ------------------------------------------------------------
 def handle_ltp_event(
-    *,
-    fyers,
-    symbol,
-    ltp,
-    mode,
-    log_fn
+    *, fyers, symbol, ltp, mode, log_fn
 ):
     state = ORDER_STATE.get(symbol)
     if not state:
@@ -250,79 +149,68 @@ def handle_ltp_event(
     side = state["side"]
     qty = state["qty"]
 
-    # ---------------- ENTRY EXECUTION ----------------
+    # ---------------- ENTRY EXEC ----------------
     if state["status"] == "PENDING":
-        trigger = state["trigger"]
+        if (side == "BUY" and ltp >= state["trigger"]) or \
+           (side == "SELL" and ltp <= state["trigger"]):
 
-        executed = (
-            (side == "BUY" and ltp >= trigger) or
-            (side == "SELL" and ltp <= trigger)
-        )
-
-        if executed:
-            state["status"] = "EXECUTED"
-
-            exec_price = ltp
+            entry = ltp
             if mode != "LIVE":
-                buffer = trigger * 0.001
-                if side == "SELL":
-                    exec_price = round_max(trigger - buffer)
-                else:
-                    exec_price = round_max(trigger + buffer)
+                buf = state["trigger"] * 0.001
+                entry = round_price(
+                    state["trigger"] + buf if side == "BUY"
+                    else state["trigger"] - buf
+                )
 
-            state["entry_price"] = exec_price
+            state["entry_price"] = entry
+            log_fn(f"ORDER_EXECUTED | {symbol} | entry={entry}")
 
-            log_fn(
-                f"ORDER_EXECUTED | {symbol} | side={side} | "
-                f"trigger={trigger} | exec={exec_price} | MODE={mode}"
+            init_sl = (
+                state["signal_low"] if side == "BUY"
+                else state["signal_high"]
             )
 
-            place_stoploss_order(
-                fyers=fyers,
-                symbol=symbol,
-                mode=mode,
-                log_fn=log_fn
+            place_sl(
+                fyers, state, symbol,
+                init_sl, mode, log_fn
             )
         return
 
-    # ---------------- RR-BASED TRAILING ----------------
-    if state["status"] == "SL_PLACED" and not state["trail_done"]:
-        entry = state["entry_price"]
+    # ---------------- PROFIT ----------------
+    entry = state["entry_price"]
+    profit = (
+        (ltp - entry) * qty if side == "BUY"
+        else (entry - ltp) * qty
+    )
 
-        if side == "SELL":
-            profit = (entry - ltp) * qty
-        else:
-            profit = (ltp - entry) * qty
+    # ---------------- RR 1.5 TRAIL ----------------
+    if profit >= RR_PROFIT and not state["trail_done"]:
+        new_sl = (
+            entry + (LOCK_PROFIT / qty)
+            if side == "BUY"
+            else entry - (LOCK_PROFIT / qty)
+        )
 
-        if profit >= 750:  # 1.5R
-            if side == "SELL":
-                new_sl = entry - (200 / qty)
-            else:
-                new_sl = entry + (200 / qty)
-
-            state["sl_price"] = new_sl
+        if cancel_sl(fyers, state, symbol, mode, log_fn):
+            place_sl(
+                fyers, state, symbol,
+                new_sl, mode, log_fn
+            )
             state["trail_done"] = True
 
             log_fn(
-                f"RR_TRAIL | {symbol} | RR=1.5 | SL moved to {round(new_sl,2)} | LOCK=200"
+                f"RR_TRAIL | {symbol} | RR=1.5 | "
+                f"SL={round(new_sl,2)} | LOCK=200"
             )
 
-    # ---------------- SL EXECUTION ----------------
+    # ---------------- SL HIT ----------------
     if state["status"] == "SL_PLACED":
-        sl_price = state["sl_price"]
-        sl_side = state["sl_side"]
+        if (side == "BUY" and ltp <= state["sl_price"]) or \
+           (side == "SELL" and ltp >= state["sl_price"]):
 
-        sl_hit = (
-            (sl_side == "SELL" and ltp <= sl_price) or
-            (sl_side == "BUY" and ltp >= sl_price)
-        )
-
-        if sl_hit:
             state["status"] = "SL_HIT"
-
             log_fn(
-                f"SL_EXECUTED | {symbol} | side={sl_side} | "
-                f"SL={sl_price} | ltp={ltp} | MODE={mode}"
+                f"SL_EXECUTED | {symbol} | SL={round(state['sl_price'],2)}"
             )
 
 
