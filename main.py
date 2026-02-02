@@ -1,5 +1,5 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py
+# RajanTradeAutomation – FINAL main.py (FIXED)
 # STEP-3E : LIVE3 VOLUME FIX (STABLE & NON-STALLING)
 # ============================================================
 
@@ -18,7 +18,6 @@ from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
-    handle_lowest_event,
     handle_ltp_event
 )
 
@@ -81,7 +80,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (LIVE3 FIX LOCKED)")
+log("SYSTEM", "main.py FINAL DEPLOY START (IMPORT FIXED)")
 
 # ============================================================
 # SETTINGS
@@ -136,8 +135,6 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-
-# 🔑 holds History-2 END cumulative WS volume
 last_ws_base_before_bias = {}
 
 volume_history = {}
@@ -183,14 +180,6 @@ def close_live_candle(symbol, c):
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
 
-        if lc >= 2:
-            handle_lowest_event(
-                fyers=fyers,
-                symbol=symbol,
-                mode=MODE,
-                log_fn=lambda m: log("ORDER", m)
-            )
-
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
             signal_counter[symbol] = sc
@@ -225,7 +214,6 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
-    # 🔑 Capture cumulative WS volume BEFORE bias time
     if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
@@ -333,7 +321,6 @@ def controller():
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        # 🔑 FINAL: LIVE3 base = History-2 END cumulative WS volume
         if s in last_ws_base_before_bias:
             last_base_vol[s] = last_ws_base_before_bias[s]
             log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
