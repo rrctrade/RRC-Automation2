@@ -61,8 +61,9 @@ def place_signal_order(
         f"trigger={trigger} qty={qty} | SIGNAL#{signal_no}"
     )
 
+    signal_order_id = None
     if mode == "LIVE":
-        fyers.place_order({
+        resp = fyers.place_order({
             "symbol": symbol,
             "qty": qty,
             "type": 3,
@@ -72,6 +73,7 @@ def place_signal_order(
             "validity": "DAY",
             "offlineOrder": False,
         })
+        signal_order_id = resp.get("id")
 
     ORDER_STATE[symbol] = {
         "status": "PENDING",
@@ -83,6 +85,7 @@ def place_signal_order(
         "entry_price": None,
         "sl_price": None,
         "sl_order_id": None,
+        "signal_order_id": signal_order_id,
         "trail_done": False,
     }
 
@@ -92,8 +95,32 @@ def place_signal_order(
 # ------------------------------------------------------------
 def handle_signal_event(**kwargs):
     symbol = kwargs["symbol"]
-    if is_frozen(symbol):
+    fyers = kwargs["fyers"]
+    mode = kwargs["mode"]
+    log_fn = kwargs["log_fn"]
+
+    state = ORDER_STATE.get(symbol)
+
+    # ❌ Trade already active → ignore new signals
+    if state and state.get("status") in ("SL_PLACED", "SL_HIT"):
         return
+
+    # 🔁 Pending signal exists → cancel it
+    if state and state.get("status") == "PENDING":
+        if mode == "LIVE" and state.get("signal_order_id"):
+            try:
+                fyers.cancel_order({"id": state["signal_order_id"]})
+                log_fn(f"ORDER_CANCEL | {symbol} | SIGNAL")
+            except Exception as e:
+                log_fn(f"SIGNAL_CANCEL_FAIL | {symbol} | {e}")
+                return
+        else:
+            # ✅ PAPER MODE cancel simulation
+            log_fn(f"PAPER_ORDER_CANCEL | {symbol} | SIGNAL")
+
+        ORDER_STATE.pop(symbol, None)
+
+    # ✅ Place fresh signal order
     place_signal_order(**kwargs)
 
 
@@ -190,7 +217,6 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
             place_sl(fyers, state, symbol, new_sl, mode, log_fn)
             state["trail_done"] = True
 
-            # ✅ FINAL: CLEAR TRAILING MESSAGE
             log_fn(
                 f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=1.5 | LOCK=200"
             )
