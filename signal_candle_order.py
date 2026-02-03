@@ -1,7 +1,7 @@
 # ============================================================
 # signal_candle_order.py
 # RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
-# LIVE + PAPER COMPATIBLE
+# LIVE + PAPER COMPATIBLE (FINAL)
 # ============================================================
 
 from math import floor
@@ -128,7 +128,7 @@ def cancel_sl(fyers, state, symbol, mode, log_fn):
     if mode == "LIVE" and state.get("sl_order_id"):
         try:
             fyers.cancel_order({"id": state["sl_order_id"]})
-            log_fn(f"SL_CANCELLED | {symbol}")
+            log_fn(f"ORDER_CANCEL | {symbol} | SL")
         except Exception as e:
             log_fn(f"SL_CANCEL_FAIL | {symbol} | {e}")
             return False
@@ -139,9 +139,7 @@ def cancel_sl(fyers, state, symbol, mode, log_fn):
 # ------------------------------------------------------------
 # HANDLE LTP EVENT
 # ------------------------------------------------------------
-def handle_ltp_event(
-    *, fyers, symbol, ltp, mode, log_fn
-):
+def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
     state = ORDER_STATE.get(symbol)
     if not state:
         return
@@ -170,10 +168,7 @@ def handle_ltp_event(
                 else state["signal_high"]
             )
 
-            place_sl(
-                fyers, state, symbol,
-                init_sl, mode, log_fn
-            )
+            place_sl(fyers, state, symbol, init_sl, mode, log_fn)
         return
 
     # ---------------- PROFIT ----------------
@@ -183,7 +178,7 @@ def handle_ltp_event(
         else (entry - ltp) * qty
     )
 
-    # ---------------- RR 1.5 TRAIL ----------------
+    # ---------------- RR 1.5 TRAILING ----------------
     if profit >= RR_PROFIT and not state["trail_done"]:
         new_sl = (
             entry + (LOCK_PROFIT / qty)
@@ -192,15 +187,12 @@ def handle_ltp_event(
         )
 
         if cancel_sl(fyers, state, symbol, mode, log_fn):
-            place_sl(
-                fyers, state, symbol,
-                new_sl, mode, log_fn
-            )
+            place_sl(fyers, state, symbol, new_sl, mode, log_fn)
             state["trail_done"] = True
 
+            # ✅ FINAL: CLEAR TRAILING MESSAGE
             log_fn(
-                f"RR_TRAIL | {symbol} | RR=1.5 | "
-                f"SL={round(new_sl,2)} | LOCK=200"
+                f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=1.5 | LOCK=200"
             )
 
     # ---------------- SL HIT ----------------
