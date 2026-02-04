@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (FIXED)
-# STEP-3F : OPEN TRADE P/L LOGGING (5 MIN)
+# RajanTradeAutomation – FINAL main.py
+# STEP-3F+ : CYCLE WISE OPEN TRADE PL (SINGLE MESSAGE)
 # ============================================================
 
 import os
@@ -81,7 +81,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (OPEN_TRADE_PL ENABLED)")
+log("SYSTEM", "main.py FINAL DEPLOY (PL CYCLE MODE)")
 
 # ============================================================
 # SETTINGS
@@ -105,9 +105,6 @@ def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
     return ist_dt.astimezone(UTC)
-
-def floor_5min(ts):
-    return ts - (ts % CANDLE_INTERVAL)
 
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
@@ -146,6 +143,10 @@ BT_FLOOR_TS = None
 bias_ts = None
 STOCK_BIAS_MAP = {}
 
+# ===== NEW PL CYCLE STATE =====
+CYCLE_PL_BUFFER = {}
+LAST_PL_CYCLE_TS = None
+
 # ============================================================
 # CLOSE LIVE CANDLE
 # ============================================================
@@ -177,7 +178,7 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
-    # ================= OPEN TRADE P/L LOGGING =================
+    # ===== OPEN TRADE PL (BUFFER ONLY) =====
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -191,12 +192,9 @@ def close_live_candle(symbol, c):
             else (entry - close_price) * qty
         )
 
-        log(
-            "ORDER",
-            f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}"
-        )
+        CYCLE_PL_BUFFER[symbol] = round(pl, 2)
 
-    # ================= SIGNAL GENERATION =================
+    # ===== SIGNAL GENERATION (UNCHANGED) =====
     if is_lowest:
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
@@ -223,8 +221,9 @@ def close_live_candle(symbol, c):
 # UPDATE CANDLE (TICK LEVEL)
 # ============================================================
 def update_candle(msg):
-    symbol = msg.get("symbol")
+    global LAST_PL_CYCLE_TS
 
+    symbol = msg.get("symbol")
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
 
@@ -252,6 +251,23 @@ def update_candle(msg):
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
+
+            # ===== ONE MESSAGE PER CANDLE CYCLE =====
+            if LAST_PL_CYCLE_TS != c["start"]:
+                LAST_PL_CYCLE_TS = c["start"]
+
+                if CYCLE_PL_BUFFER:
+                    total = round(sum(CYCLE_PL_BUFFER.values()), 2)
+                    parts = [f"{s}:{p}" for s, p in CYCLE_PL_BUFFER.items()]
+
+                    log(
+                        "ORDER",
+                        "PL_CYCLE_UPDATE | "
+                        + " | ".join(parts)
+                        + f" | TOTAL={total}"
+                    )
+
+                    CYCLE_PL_BUFFER.clear()
 
         candles[symbol] = {
             "start": start,
@@ -304,7 +320,7 @@ def controller():
     while datetime.now(UTC).timestamp() < bias_ts:
         time.sleep(1)
 
-    BT_FLOOR_TS = floor_5min(bias_ts)
+    BT_FLOOR_TS = candle_start(bias_ts)
     log("BIAS", "Bias calculation started")
 
     res = run_sector_bias()
@@ -351,7 +367,7 @@ def controller():
 threading.Thread(target=controller, daemon=True).start()
 
 # ============================================================
-# FLASK ROUTES
+# FLASK
 # ============================================================
 @app.route("/")
 def health():
@@ -362,8 +378,5 @@ def fyers_redirect():
     log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
 
-# ============================================================
-# START
-# ============================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
