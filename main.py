@@ -107,8 +107,9 @@ def parse_bias_time_utc(tstr):
     if not tstr:
         raise ValueError("BIAS_TIME missing")
 
-    if len(tstr.split(":")) == 2:
-        tstr = tstr + ":00
+    parts = tstr.split(":")
+    if len(parts) == 2:
+        tstr = tstr + ":00"   # HH:MM → HH:MM:SS
 
     t = datetime.strptime(tstr, "%H:%M:%S").time()
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
@@ -319,7 +320,6 @@ def controller():
     )
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
     log("SYSTEM", "History loaded – system LIVE")
 
 threading.Thread(target=controller, daemon=True).start()
