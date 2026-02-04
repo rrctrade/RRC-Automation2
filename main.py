@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # PL_CYCLE_UPDATE | Realised + Unrealised + ALLOVER
+# AUTO CLEAR LOGS ON DEPLOY
 # ============================================================
 
 import os
@@ -70,9 +71,19 @@ def log(level, msg):
 
 def clear_logs():
     try:
-        requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
+        requests.post(
+            WEBAPP_URL,
+            json={"action": "clearLogs"},
+            timeout=5
+        )
     except Exception:
         pass
+
+# ============================================================
+# 🔥 CLEAR LOGS ON EVERY DEPLOY (ONCE)
+# ============================================================
+clear_logs()
+log("SYSTEM", "DEPLOY START – LOGS CLEARED")
 
 # ============================================================
 # SETTINGS
@@ -97,7 +108,7 @@ def parse_bias_time_utc(tstr):
         raise ValueError("BIAS_TIME missing")
 
     if len(tstr.split(":")) == 2:
-        tstr = tstr + ":00"   # HH:MM → HH:MM:SS
+        tstr = tstr + ":00
 
     t = datetime.strptime(tstr, "%H:%M:%S").time()
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
@@ -141,9 +152,9 @@ bias_ts = None
 STOCK_BIAS_MAP = {}
 
 # ===== PL STATE =====
-CYCLE_PL_BUFFER = {}        # unrealised per cycle
+CYCLE_PL_BUFFER = {}
 LAST_PL_CYCLE_TS = None
-DAY_REALISED_PL = 0.0       # realised (SL / exits)
+DAY_REALISED_PL = 0.0
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -155,7 +166,6 @@ def close_live_candle(symbol, c):
 
     last_base_vol[symbol] = c["base_vol"]
 
-    # ===== UNREALISED PL BUFFER =====
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -178,7 +188,6 @@ def update_candle(msg):
     global LAST_PL_CYCLE_TS, DAY_REALISED_PL
 
     symbol = msg.get("symbol")
-
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
 
@@ -192,11 +201,9 @@ def update_candle(msg):
     if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
-    # ===== LTP EVENTS (SL / EXECUTION) =====
     def _log_and_capture(m):
         global DAY_REALISED_PL
         log("ORDER", m)
-
         if m.startswith("SL_EXECUTED") and "LOSS" in m:
             DAY_REALISED_PL -= PER_TRADE_RISK
 
@@ -215,7 +222,6 @@ def update_candle(msg):
         if c:
             close_live_candle(symbol, c)
 
-            # ===== ONE MESSAGE PER 5-MIN CYCLE =====
             if LAST_PL_CYCLE_TS != c["start"]:
                 LAST_PL_CYCLE_TS = c["start"]
 
@@ -279,7 +285,6 @@ def controller():
     global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
 
     bias_ts = int(parse_bias_time_utc(BIAS_TIME_STR).timestamp())
-
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
     while datetime.now(UTC).timestamp() < bias_ts:
@@ -314,18 +319,6 @@ def controller():
     )
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
-    for s in ACTIVE_SYMBOLS:
-        volume_history.setdefault(s, [])
-
-        history = fetch_two_history_candles(s, BT_FLOOR_TS)
-        for ts, o, h, l, c, v in history[:2]:
-            volume_history[s].append(v)
-            log("HISTORY", f"{s} | {datetime.fromtimestamp(ts, UTC).astimezone(IST).strftime('%H:%M:%S')} | V={v}")
-
-        if s in last_ws_base_before_bias:
-            last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
