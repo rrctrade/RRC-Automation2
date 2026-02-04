@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py (FIXED)
-# STEP-3E : LIVE3 VOLUME FIX (STABLE & NON-STALLING)
+# STEP-3F : OPEN TRADE P/L LOGGING (5 MIN)
 # ============================================================
 
 import os
@@ -18,7 +18,8 @@ from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
-    handle_ltp_event
+    handle_ltp_event,
+    ORDER_STATE
 )
 
 # ============================================================
@@ -80,7 +81,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (IMPORT FIXED)")
+log("SYSTEM", "main.py FINAL DEPLOY START (OPEN_TRADE_PL ENABLED)")
 
 # ============================================================
 # SETTINGS
@@ -176,6 +177,26 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
+    # ================= OPEN TRADE P/L LOGGING =================
+    state = ORDER_STATE.get(symbol)
+    if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
+        entry = state["entry_price"]
+        qty = state["qty"]
+        side = state["side"]
+        close_price = c["close"]
+
+        pl = (
+            (close_price - entry) * qty
+            if side == "BUY"
+            else (entry - close_price) * qty
+        )
+
+        log(
+            "ORDER",
+            f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}"
+        )
+
+    # ================= SIGNAL GENERATION =================
     if is_lowest:
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
