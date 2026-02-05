@@ -1,6 +1,5 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (CORRECTED & LOCKED)
-# HISTORY + LIVE + SIGNAL + SL + PL_CYCLE_UPDATE
+# RajanTradeAutomation – FINAL main.py (LOG + PL FIXED)
 # ============================================================
 
 import os
@@ -111,10 +110,10 @@ def parse_bias_time_utc(tstr):
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
     return ist_dt.astimezone(UTC)
 
-def floor_5min(ts):
+def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-def candle_start(ts):
+def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
@@ -155,8 +154,7 @@ STOCK_BIAS_MAP = {}
 CYCLE_PL_BUFFER = {}
 LAST_PL_CYCLE_TS = None
 DAY_REALISED_PL = 0.0
-
-HAS_EXECUTION = False   # 🔒 ORDER_EXECUTED or SL_PLACED / SL_EXECUTED
+HAS_EXECUTION = False   # ORDER_EXECUTED or SL_PLACED/SL_EXECUTED
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -173,23 +171,16 @@ def close_live_candle(symbol, c):
     is_lowest = prev_min is not None and candle_vol < prev_min
     volume_history.setdefault(symbol, []).append(candle_vol)
 
-    color = (
-        "RED" if c["open"] > c["close"]
-        else "GREEN" if c["open"] < c["close"]
-        else "DOJI"
-    )
-
+    color = "GREEN" if c["close"] > c["open"] else "RED"
     bias = STOCK_BIAS_MAP.get(symbol, "")
-    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
-    label = f"LIVE{offset + 3}"
 
     log(
         "VOLCHK",
-        f"{symbol} | {label} | vol={round(candle_vol,2)} | "
+        f"{symbol} | vol={round(candle_vol,2)} | "
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
-    # ===== UNREALISED PL BUFFER =====
+    # ===== UNREALISED PL =====
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -202,31 +193,7 @@ def close_live_candle(symbol, c):
             if side == "BUY"
             else (entry - close_price) * qty
         )
-
         CYCLE_PL_BUFFER[symbol] = round(pl, 2)
-
-    # ===== SIGNAL GENERATION =====
-    if is_lowest:
-        lc = lowest_counter.get(symbol, 0) + 1
-        lowest_counter[symbol] = lc
-
-        if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
-            sc = signal_counter.get(symbol, 0) + 1
-            signal_counter[symbol] = sc
-
-            side = "BUY" if bias == "B" else "SELL"
-
-            handle_signal_event(
-                fyers=fyers,
-                symbol=symbol,
-                side=side,
-                high=c["high"],
-                low=c["low"],
-                per_trade_risk=PER_TRADE_RISK,
-                mode=MODE,
-                signal_no=sc,
-                log_fn=lambda m: log("ORDER", m)
-            )
 
 # ============================================================
 # UPDATE CANDLE (TICK LEVEL)
@@ -241,16 +208,15 @@ def update_candle(msg):
     ltp = msg.get("ltp")
     base_vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
-
     if ltp is None or base_vol is None or ts is None:
         return
 
     if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
+    # ===== ORDER / SL LOG CAPTURE =====
     def _log_and_capture(m):
         global DAY_REALISED_PL, HAS_EXECUTION
-
         log("ORDER", m)
 
         if m.startswith("ORDER_EXECUTED"):
@@ -277,17 +243,16 @@ def update_candle(msg):
     start = candle_start(ts)
     c = candles.get(symbol)
 
+    # ===== NEW CANDLE =====
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
 
-            # ===== PL UPDATE (LAST LOG OF CYCLE) =====
+            # ===== PL UPDATE (LAST LOG OF 5-MIN CYCLE) =====
             if LAST_PL_CYCLE_TS != c["start"]:
                 LAST_PL_CYCLE_TS = c["start"]
 
-                if not HAS_EXECUTION:
-                    CYCLE_PL_BUFFER.clear()
-                else:
+                if HAS_EXECUTION:
                     unrealised = round(sum(CYCLE_PL_BUFFER.values()), 2)
                     total = round(DAY_REALISED_PL + unrealised, 2)
 
@@ -303,7 +268,7 @@ def update_candle(msg):
                             + f" | TOTAL={total}"
                         )
 
-                    CYCLE_PL_BUFFER.clear()
+                CYCLE_PL_BUFFER.clear()
 
         candles[symbol] = {
             "start": start,
@@ -377,31 +342,12 @@ def controller():
     ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
-    fyers_ws.unsubscribe(
-        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
-        data_type="SymbolUpdate"
-    )
-
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
-    for s in ACTIVE_SYMBOLS:
-        volume_history.setdefault(s, [])
-
-        history = fetch_two_history_candles(s, BT_FLOOR_TS)
-        for ts, o, h, l, c, v in history[:2]:
-            volume_history[s].append(v)
-            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
-
-        if s in last_ws_base_before_bias:
-            last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
-
-    log("SYSTEM", "History loaded – system LIVE")
 
 threading.Thread(target=controller, daemon=True).start()
 
 # ============================================================
-# FLASK ROUTES
+# FLASK
 # ============================================================
 @app.route("/")
 def health():
@@ -412,8 +358,5 @@ def fyers_redirect():
     log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
 
-# ============================================================
-# START
-# ============================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
