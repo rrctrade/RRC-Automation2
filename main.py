@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (PL_CYCLE_UPDATE FINAL)
-# BASE: User provided STABLE main.py
+# RajanTradeAutomation – FINAL main.py (FIXED)
+# STEP-3F : OPEN TRADE P/L LOGGING (5 MIN)
 # ============================================================
 
 import os
@@ -19,8 +19,7 @@ from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
-    ORDER_STATE,
-    LOCK_PROFIT
+    ORDER_STATE
 )
 
 # ============================================================
@@ -82,7 +81,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (PL_CYCLE_UPDATE ENABLED)")
+log("SYSTEM", "main.py FINAL DEPLOY START (OPEN_TRADE_PL ENABLED)")
 
 # ============================================================
 # SETTINGS
@@ -147,12 +146,6 @@ BT_FLOOR_TS = None
 bias_ts = None
 STOCK_BIAS_MAP = {}
 
-# ===== PL STATE =====
-CYCLE_PL_BUFFER = {}
-LAST_PL_CYCLE_TS = None
-DAY_REALISED_PL = 0.0
-HAS_EXECUTION = False   # ORDER_EXECUTED / SL_PLACED / SL_EXECUTED
-
 # ============================================================
 # CLOSE LIVE CANDLE
 # ============================================================
@@ -184,7 +177,7 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
-    # ===== UNREALISED PL BUFFER =====
+    # ================= OPEN TRADE P/L LOGGING =================
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -198,9 +191,12 @@ def close_live_candle(symbol, c):
             else (entry - close_price) * qty
         )
 
-        CYCLE_PL_BUFFER[symbol] = round(pl, 2)
+        log(
+            "ORDER",
+            f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}"
+        )
 
-    # ===== SIGNAL GENERATION (UNCHANGED) =====
+    # ================= SIGNAL GENERATION =================
     if is_lowest:
         lc = lowest_counter.get(symbol, 0) + 1
         lowest_counter[symbol] = lc
@@ -227,9 +223,8 @@ def close_live_candle(symbol, c):
 # UPDATE CANDLE (TICK LEVEL)
 # ============================================================
 def update_candle(msg):
-    global LAST_PL_CYCLE_TS, DAY_REALISED_PL, HAS_EXECUTION
-
     symbol = msg.get("symbol")
+
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
 
@@ -243,27 +238,12 @@ def update_candle(msg):
     if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
-    # ===== CAPTURE ORDER / SL LOGS =====
-    def _log_and_capture(m):
-        global DAY_REALISED_PL, HAS_EXECUTION
-        log("ORDER", m)
-
-        if m.startswith("ORDER_EXECUTED") or m.startswith("SL_PLACED"):
-            HAS_EXECUTION = True
-
-        if m.startswith("SL_EXECUTED"):
-            HAS_EXECUTION = True
-            if "NO LOSS" in m:
-                DAY_REALISED_PL += LOCK_PROFIT
-            else:
-                DAY_REALISED_PL -= PER_TRADE_RISK
-
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
         ltp=ltp,
         mode=MODE,
-        log_fn=_log_and_capture
+        log_fn=lambda m: log("ORDER", m)
     )
 
     start = candle_start(ts)
@@ -272,28 +252,6 @@ def update_candle(msg):
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
-
-            # ===== PL UPDATE (LAST LOG OF 5-MIN CYCLE) =====
-            if LAST_PL_CYCLE_TS != c["start"]:
-                LAST_PL_CYCLE_TS = c["start"]
-
-                if HAS_EXECUTION:
-                    unrealised = round(sum(CYCLE_PL_BUFFER.values()), 2)
-                    total = round(DAY_REALISED_PL + unrealised, 2)
-
-                    if DAY_REALISED_PL != 0 or unrealised != 0:
-                        parts = [f"{s}={p}" for s, p in CYCLE_PL_BUFFER.items()]
-
-                        log(
-                            "ORDER",
-                            "PL_CYCLE_UPDATE | "
-                            + " | ".join(parts)
-                            + f" | REALISED={round(DAY_REALISED_PL,2)}"
-                            + f" | UNREALISED={unrealised}"
-                            + f" | TOTAL={total}"
-                        )
-
-                CYCLE_PL_BUFFER.clear()
 
         candles[symbol] = {
             "start": start,
