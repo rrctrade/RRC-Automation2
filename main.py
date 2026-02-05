@@ -179,7 +179,14 @@ def close_live_candle(symbol, c):
 
     # ================= OPEN TRADE P/L LOGGING =================
     state = ORDER_STATE.get(symbol)
-    if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
+
+    # ✅ FIX: PL only if entry actually happened in THIS deployment
+    if (
+        state
+        and state.get("status") == "SL_PLACED"
+        and state.get("entry_price")
+        and state.get("entry_seen") is True
+    ):
         entry = state["entry_price"]
         qty = state["qty"]
         side = state["side"]
