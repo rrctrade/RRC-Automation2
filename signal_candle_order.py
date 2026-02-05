@@ -83,6 +83,7 @@ def place_signal_order(
         "signal_high": high,
         "signal_low": low,
         "entry_price": None,
+        "entry_seen": False,   # ✅ FIX: deployment-local entry flag
         "sl_price": None,
         "sl_order_id": None,
         "signal_order_id": signal_order_id,
@@ -115,7 +116,6 @@ def handle_signal_event(**kwargs):
                 log_fn(f"SIGNAL_CANCEL_FAIL | {symbol} | {e}")
                 return
         else:
-            # ✅ PAPER MODE cancel simulation
             log_fn(f"PAPER_ORDER_CANCEL | {symbol} | SIGNAL")
 
         ORDER_STATE.pop(symbol, None)
@@ -188,6 +188,7 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
                 )
 
             state["entry_price"] = entry
+            state["entry_seen"] = True   # ✅ FIX: mark real entry
             log_fn(f"ORDER_EXECUTED | {symbol} | entry={entry}")
 
             init_sl = (
