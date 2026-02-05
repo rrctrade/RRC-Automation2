@@ -1,5 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (HISTORY + LIVE FIXED)
+# RajanTradeAutomation – FINAL main.py (PL_CYCLE_UPDATE FINAL)
+# BASE: User provided STABLE main.py
 # ============================================================
 
 import os
@@ -81,7 +82,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "DEPLOY START – LOGS CLEARED")
+log("SYSTEM", "main.py FINAL DEPLOY START (PL_CYCLE_UPDATE ENABLED)")
 
 # ============================================================
 # SETTINGS
@@ -95,17 +96,13 @@ SETTINGS = get_settings()
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
-PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 500))
+PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
 # ============================================================
 # TIME HELPERS
 # ============================================================
 def parse_bias_time_utc(tstr):
-    if not tstr:
-        raise ValueError("BIAS_TIME missing")
-    if len(tstr.split(":")) == 2:
-        tstr += ":00"
     t = datetime.strptime(tstr, "%H:%M:%S").time()
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
     return ist_dt.astimezone(UTC)
@@ -154,7 +151,7 @@ STOCK_BIAS_MAP = {}
 CYCLE_PL_BUFFER = {}
 LAST_PL_CYCLE_TS = None
 DAY_REALISED_PL = 0.0
-HAS_EXECUTION = False
+HAS_EXECUTION = False   # ORDER_EXECUTED / SL_PLACED / SL_EXECUTED
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -172,8 +169,8 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(candle_vol)
 
     color = (
-        "GREEN" if c["close"] > c["open"]
-        else "RED" if c["close"] < c["open"]
+        "RED" if c["open"] > c["close"]
+        else "GREEN" if c["open"] < c["close"]
         else "DOJI"
     )
 
@@ -187,7 +184,7 @@ def close_live_candle(symbol, c):
         f"is_lowest={is_lowest} | {color} {bias}"
     )
 
-    # ===== UNREALISED PL =====
+    # ===== UNREALISED PL BUFFER =====
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -203,12 +200,15 @@ def close_live_candle(symbol, c):
 
         CYCLE_PL_BUFFER[symbol] = round(pl, 2)
 
-    # ===== SIGNAL GENERATION =====
+    # ===== SIGNAL GENERATION (UNCHANGED) =====
     if is_lowest:
-        sc = signal_counter.get(symbol, 0) + 1
-        signal_counter[symbol] = sc
+        lc = lowest_counter.get(symbol, 0) + 1
+        lowest_counter[symbol] = lc
 
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
+            sc = signal_counter.get(symbol, 0) + 1
+            signal_counter[symbol] = sc
+
             side = "BUY" if bias == "B" else "SELL"
 
             handle_signal_event(
@@ -243,14 +243,12 @@ def update_candle(msg):
     if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
+    # ===== CAPTURE ORDER / SL LOGS =====
     def _log_and_capture(m):
         global DAY_REALISED_PL, HAS_EXECUTION
         log("ORDER", m)
 
-        if m.startswith("ORDER_EXECUTED"):
-            HAS_EXECUTION = True
-
-        if m.startswith("SL_PLACED"):
+        if m.startswith("ORDER_EXECUTED") or m.startswith("SL_PLACED"):
             HAS_EXECUTION = True
 
         if m.startswith("SL_EXECUTED"):
@@ -275,6 +273,7 @@ def update_candle(msg):
         if c:
             close_live_candle(symbol, c)
 
+            # ===== PL UPDATE (LAST LOG OF 5-MIN CYCLE) =====
             if LAST_PL_CYCLE_TS != c["start"]:
                 LAST_PL_CYCLE_TS = c["start"]
 
@@ -339,7 +338,9 @@ threading.Thread(target=start_ws, daemon=True).start()
 def controller():
     global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
 
-    bias_ts = int(parse_bias_time_utc(BIAS_TIME_STR).timestamp())
+    bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
+    bias_ts = int(bias_dt.timestamp())
+
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
     while datetime.now(UTC).timestamp() < bias_ts:
@@ -368,9 +369,13 @@ def controller():
     ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
+        data_type="SymbolUpdate"
+    )
+
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
-    # ===== HISTORY + LIVE3 BASE =====
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
 
@@ -383,18 +388,12 @@ def controller():
             last_base_vol[s] = last_ws_base_before_bias[s]
             log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
 
-    # ===== UNSUBSCRIBE AFTER HISTORY LOAD =====
-    fyers_ws.unsubscribe(
-        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
-        data_type="SymbolUpdate"
-    )
-
     log("SYSTEM", "History loaded – system LIVE")
 
 threading.Thread(target=controller, daemon=True).start()
 
 # ============================================================
-# FLASK
+# FLASK ROUTES
 # ============================================================
 @app.route("/")
 def health():
