@@ -1,8 +1,7 @@
 # ============================================================
 # signal_candle_order.py
-# RR 1.5 ONLY → TRAILING SL
-# ORDER_EXECUTED + SL_PLACED = SINGLE LOG
-# FINAL DEPLOY-SAFE VERSION
+# RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
+# LIVE + PAPER COMPATIBLE (FINAL)
 # ============================================================
 
 from math import floor
@@ -18,6 +17,10 @@ LOCK_PROFIT = 200
 # ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
+def is_frozen(symbol):
+    return ORDER_STATE.get(symbol, {}).get("status") == "SL_HIT"
+
+
 def round_price(price):
     if price >= 500:
         unit = 1.0
@@ -28,14 +31,18 @@ def round_price(price):
     return floor(price / unit) * unit
 
 
+# ------------------------------------------------------------
+# QTY
+# ------------------------------------------------------------
 def calc_qty(high, low, risk):
     rng = abs(high - low)
     if rng <= 0:
         return 0
     return floor(risk / rng)
 
+
 # ------------------------------------------------------------
-# PLACE SIGNAL ORDER
+# PLACE ENTRY ORDER
 # ------------------------------------------------------------
 def place_signal_order(
     *, fyers, symbol, side, high, low,
@@ -82,8 +89,9 @@ def place_signal_order(
         "trail_done": False,
     }
 
+
 # ------------------------------------------------------------
-# HANDLE SIGNAL EVENT  ✅ (RESTORED)
+# HANDLE SIGNAL
 # ------------------------------------------------------------
 def handle_signal_event(**kwargs):
     symbol = kwargs["symbol"]
@@ -93,11 +101,11 @@ def handle_signal_event(**kwargs):
 
     state = ORDER_STATE.get(symbol)
 
-    # ❌ Ignore if trade already active
+    # ❌ Trade already active → ignore new signals
     if state and state.get("status") in ("SL_PLACED", "SL_HIT"):
         return
 
-    # 🔁 Cancel pending signal
+    # 🔁 Pending signal exists → cancel it
     if state and state.get("status") == "PENDING":
         if mode == "LIVE" and state.get("signal_order_id"):
             try:
@@ -107,11 +115,53 @@ def handle_signal_event(**kwargs):
                 log_fn(f"SIGNAL_CANCEL_FAIL | {symbol} | {e}")
                 return
         else:
+            # ✅ PAPER MODE cancel simulation
             log_fn(f"PAPER_ORDER_CANCEL | {symbol} | SIGNAL")
 
         ORDER_STATE.pop(symbol, None)
 
+    # ✅ Place fresh signal order
     place_signal_order(**kwargs)
+
+
+# ------------------------------------------------------------
+# SL PLACE / CANCEL
+# ------------------------------------------------------------
+def place_sl(fyers, state, symbol, sl_price, mode, log_fn):
+    side = state["side"]
+    qty = state["qty"]
+    sl_side = -1 if side == "BUY" else 1
+
+    if mode == "LIVE":
+        resp = fyers.place_order({
+            "symbol": symbol,
+            "qty": qty,
+            "type": 3,
+            "side": sl_side,
+            "productType": "INTRADAY",
+            "stopPrice": round_price(sl_price),
+            "validity": "DAY",
+            "offlineOrder": False,
+        })
+        state["sl_order_id"] = resp.get("id")
+
+    state["sl_price"] = sl_price
+    state["status"] = "SL_PLACED"
+
+    log_fn(f"SL_PLACED | {symbol} | SL={round(sl_price,2)} | MODE={mode}")
+
+
+def cancel_sl(fyers, state, symbol, mode, log_fn):
+    if mode == "LIVE" and state.get("sl_order_id"):
+        try:
+            fyers.cancel_order({"id": state["sl_order_id"]})
+            log_fn(f"ORDER_CANCEL | {symbol} | SL")
+        except Exception as e:
+            log_fn(f"SL_CANCEL_FAIL | {symbol} | {e}")
+            return False
+    state["sl_order_id"] = None
+    return True
+
 
 # ------------------------------------------------------------
 # HANDLE LTP EVENT
@@ -138,20 +188,14 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
                 )
 
             state["entry_price"] = entry
+            log_fn(f"ORDER_EXECUTED | {symbol} | entry={entry}")
 
             init_sl = (
                 state["signal_low"] if side == "BUY"
                 else state["signal_high"]
             )
 
-            state["sl_price"] = init_sl
-            state["status"] = "SL_PLACED"
-
-            # ✅ COMBINED LOG (ORDER_EXECUTED + SL_PLACED)
-            log_fn(
-                f"ORDER_EXECUTED | {symbol} | entry={entry}\n"
-                f"SL_PLACED | {symbol} | SL={round(init_sl,2)} | MODE={mode}"
-            )
+            place_sl(fyers, state, symbol, init_sl, mode, log_fn)
         return
 
     # ---------------- PROFIT ----------------
@@ -169,12 +213,13 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
             else entry - (LOCK_PROFIT / qty)
         )
 
-        state["sl_price"] = new_sl
-        state["trail_done"] = True
+        if cancel_sl(fyers, state, symbol, mode, log_fn):
+            place_sl(fyers, state, symbol, new_sl, mode, log_fn)
+            state["trail_done"] = True
 
-        log_fn(
-            f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=1.5 | LOCK=200"
-        )
+            log_fn(
+                f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=1.5 | LOCK=200"
+            )
 
     # ---------------- SL HIT ----------------
     if state["status"] == "SL_PLACED":
@@ -186,12 +231,11 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
                 f"SL_EXECUTED | {symbol} | SL={round(state['sl_price'],2)}"
             )
 
+
 # ------------------------------------------------------------
 # EXPORTS
 # ------------------------------------------------------------
 __all__ = [
     "handle_signal_event",
     "handle_ltp_event",
-    "ORDER_STATE",
-    "LOCK_PROFIT",
 ]
