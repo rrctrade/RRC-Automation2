@@ -1,7 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py
-# PL_CYCLE_UPDATE | Realised + Unrealised + ALLOVER
-# AUTO CLEAR LOGS ON DEPLOY
+# RajanTradeAutomation – FINAL main.py (MERGED)
+# HISTORY + LIVE + SIGNAL + SL + PL_CYCLE_UPDATE
 # ============================================================
 
 import os
@@ -71,16 +70,15 @@ def log(level, msg):
 
 def clear_logs():
     try:
-        requests.post(
-            WEBAPP_URL,
-            json={"action": "clearLogs"},
-            timeout=5
-        )
+        requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
     except Exception:
         pass
 
+def fmt_ist(ts):
+    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
+
 # ============================================================
-# 🔥 CLEAR LOGS ON EVERY DEPLOY (ONCE)
+# CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
 log("SYSTEM", "DEPLOY START – LOGS CLEARED")
@@ -106,14 +104,14 @@ MODE = SETTINGS.get("MODE", "PAPER")
 def parse_bias_time_utc(tstr):
     if not tstr:
         raise ValueError("BIAS_TIME missing")
-
-    parts = tstr.split(":")
-    if len(parts) == 2:
-        tstr = tstr + ":00"   # HH:MM → HH:MM:SS
-
+    if len(tstr.split(":")) == 2:
+        tstr += ":00"
     t = datetime.strptime(tstr, "%H:%M:%S").time()
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
     return ist_dt.astimezone(UTC)
+
+def floor_5min(ts):
+    return ts - (ts % CANDLE_INTERVAL)
 
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
@@ -165,8 +163,30 @@ def close_live_candle(symbol, c):
     if prev_base is None:
         return
 
+    candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
+    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
+    is_lowest = prev_min is not None and candle_vol < prev_min
+    volume_history.setdefault(symbol, []).append(candle_vol)
+
+    color = (
+        "RED" if c["open"] > c["close"]
+        else "GREEN" if c["open"] < c["close"]
+        else "DOJI"
+    )
+
+    bias = STOCK_BIAS_MAP.get(symbol, "")
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
+
+    log(
+        "VOLCHK",
+        f"{symbol} | {label} | vol={round(candle_vol,2)} | "
+        f"is_lowest={is_lowest} | {color} {bias}"
+    )
+
+    # ===== UNREALISED PL BUFFER =====
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -181,6 +201,29 @@ def close_live_candle(symbol, c):
         )
 
         CYCLE_PL_BUFFER[symbol] = round(pl, 2)
+
+    # ===== SIGNAL GENERATION =====
+    if is_lowest:
+        lc = lowest_counter.get(symbol, 0) + 1
+        lowest_counter[symbol] = lc
+
+        if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
+            sc = signal_counter.get(symbol, 0) + 1
+            signal_counter[symbol] = sc
+
+            side = "BUY" if bias == "B" else "SELL"
+
+            handle_signal_event(
+                fyers=fyers,
+                symbol=symbol,
+                side=side,
+                high=c["high"],
+                low=c["low"],
+                per_trade_risk=PER_TRADE_RISK,
+                mode=MODE,
+                signal_no=sc,
+                log_fn=lambda m: log("ORDER", m)
+            )
 
 # ============================================================
 # UPDATE CANDLE (TICK LEVEL)
@@ -229,7 +272,7 @@ def update_candle(msg):
                 unrealised = round(sum(CYCLE_PL_BUFFER.values()), 2)
                 total = round(DAY_REALISED_PL + unrealised, 2)
 
-                parts = [f"{s}:{p}" for s, p in CYCLE_PL_BUFFER.items()]
+                parts = [f"{s}={p}" for s, p in CYCLE_PL_BUFFER.items()]
 
                 log(
                     "ORDER",
@@ -291,7 +334,7 @@ def controller():
     while datetime.now(UTC).timestamp() < bias_ts:
         time.sleep(1)
 
-    BT_FLOOR_TS = candle_start(bias_ts)
+    BT_FLOOR_TS = floor_5min(bias_ts)
     log("BIAS", "Bias calculation started")
 
     res = run_sector_bias()
@@ -320,6 +363,19 @@ def controller():
     )
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+    for s in ACTIVE_SYMBOLS:
+        volume_history.setdefault(s, [])
+
+        history = fetch_two_history_candles(s, BT_FLOOR_TS)
+        for ts, o, h, l, c, v in history[:2]:
+            volume_history[s].append(v)
+            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+
     log("SYSTEM", "History loaded – system LIVE")
 
 threading.Thread(target=controller, daemon=True).start()
