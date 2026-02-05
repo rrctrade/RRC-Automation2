@@ -1,5 +1,5 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (MERGED)
+# RajanTradeAutomation – FINAL main.py (CORRECTED & LOCKED)
 # HISTORY + LIVE + SIGNAL + SL + PL_CYCLE_UPDATE
 # ============================================================
 
@@ -19,7 +19,8 @@ from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
-    ORDER_STATE
+    ORDER_STATE,
+    LOCK_PROFIT
 )
 
 # ============================================================
@@ -155,6 +156,8 @@ CYCLE_PL_BUFFER = {}
 LAST_PL_CYCLE_TS = None
 DAY_REALISED_PL = 0.0
 
+HAS_EXECUTION = False   # 🔒 ORDER_EXECUTED or SL_PLACED / SL_EXECUTED
+
 # ============================================================
 # CLOSE LIVE CANDLE
 # ============================================================
@@ -229,7 +232,7 @@ def close_live_candle(symbol, c):
 # UPDATE CANDLE (TICK LEVEL)
 # ============================================================
 def update_candle(msg):
-    global LAST_PL_CYCLE_TS, DAY_REALISED_PL
+    global LAST_PL_CYCLE_TS, DAY_REALISED_PL, HAS_EXECUTION
 
     symbol = msg.get("symbol")
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
@@ -246,10 +249,22 @@ def update_candle(msg):
         last_ws_base_before_bias[symbol] = base_vol
 
     def _log_and_capture(m):
-        global DAY_REALISED_PL
+        global DAY_REALISED_PL, HAS_EXECUTION
+
         log("ORDER", m)
-        if m.startswith("SL_EXECUTED") and "LOSS" in m:
-            DAY_REALISED_PL -= PER_TRADE_RISK
+
+        if m.startswith("ORDER_EXECUTED"):
+            HAS_EXECUTION = True
+
+        if m.startswith("SL_PLACED"):
+            HAS_EXECUTION = True
+
+        if m.startswith("SL_EXECUTED"):
+            HAS_EXECUTION = True
+            if "NO LOSS" in m:
+                DAY_REALISED_PL += LOCK_PROFIT
+            else:
+                DAY_REALISED_PL -= PER_TRADE_RISK
 
     handle_ltp_event(
         fyers=fyers,
@@ -266,24 +281,29 @@ def update_candle(msg):
         if c:
             close_live_candle(symbol, c)
 
+            # ===== PL UPDATE (LAST LOG OF CYCLE) =====
             if LAST_PL_CYCLE_TS != c["start"]:
                 LAST_PL_CYCLE_TS = c["start"]
 
-                unrealised = round(sum(CYCLE_PL_BUFFER.values()), 2)
-                total = round(DAY_REALISED_PL + unrealised, 2)
+                if not HAS_EXECUTION:
+                    CYCLE_PL_BUFFER.clear()
+                else:
+                    unrealised = round(sum(CYCLE_PL_BUFFER.values()), 2)
+                    total = round(DAY_REALISED_PL + unrealised, 2)
 
-                parts = [f"{s}={p}" for s, p in CYCLE_PL_BUFFER.items()]
+                    if DAY_REALISED_PL != 0 or unrealised != 0:
+                        parts = [f"{s}={p}" for s, p in CYCLE_PL_BUFFER.items()]
 
-                log(
-                    "ORDER",
-                    "PL_CYCLE_UPDATE | "
-                    + " | ".join(parts)
-                    + f" | REALISED={round(DAY_REALISED_PL,2)}"
-                    + f" | UNREALISED={unrealised}"
-                    + f" | TOTAL={total}"
-                )
+                        log(
+                            "ORDER",
+                            "PL_CYCLE_UPDATE | "
+                            + " | ".join(parts)
+                            + f" | REALISED={round(DAY_REALISED_PL,2)}"
+                            + f" | UNREALISED={unrealised}"
+                            + f" | TOTAL={total}"
+                        )
 
-                CYCLE_PL_BUFFER.clear()
+                    CYCLE_PL_BUFFER.clear()
 
         candles[symbol] = {
             "start": start,
