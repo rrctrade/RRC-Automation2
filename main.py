@@ -1,5 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py (ENTRY+SL COMBINED)
+# RajanTradeAutomation – FINAL main.py
+# ENTRY + SL COMBINED + WS UNSUBSCRIBE RESTORED
 # ============================================================
 
 import os
@@ -70,7 +71,7 @@ def fmt_ist(ts):
 
 # ================= DEPLOY =================
 clear_logs()
-log("SYSTEM", "main.py DEPLOYED (ENTRY+SL COMBINED)")
+log("SYSTEM", "main.py DEPLOYED (ENTRY+SL COMBINED + WS FIXED)")
 
 # ================= SETTINGS =================
 def get_settings():
@@ -146,7 +147,6 @@ def close_live_candle(symbol, c):
 
     state = ORDER_STATE.get(symbol)
 
-    # OPEN TRADE PL only if entry actually happened
     if (
         state
         and state.get("status") == "SL_PLACED"
@@ -183,7 +183,6 @@ def update_candle(msg):
     if not BIAS_DONE and bias_ts and ts < bias_ts:
         last_ws_base_before_bias[symbol] = base_vol
 
-    # handle LTP (this emits ORDER_EXECUTED + SL_PLACED internally)
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -192,7 +191,6 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
-    # 🔑 COMBINED ENTRY + SL LOG
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -276,6 +274,12 @@ def controller():
 
     ACTIVE_SYMBOLS.update(all_selected)
     BIAS_DONE = True
+
+    # 🔑 CRITICAL FIX: unsubscribe non-active symbols
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
+        data_type="SymbolUpdate"
+    )
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
