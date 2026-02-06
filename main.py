@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# ENTRY + SL COMBINED + WS UNSUBSCRIBE RESTORED
+# SAFE BOOT + WS FIX + ENTRY+SL COMBINED + FYERS REDIRECT
 # ============================================================
 
 import os
@@ -16,11 +16,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import run_sector_bias, SECTOR_LIST
-from signal_candle_order import (
-    handle_signal_event,
-    handle_ltp_event,
-    ORDER_STATE
-)
+from signal_candle_order import handle_ltp_event, ORDER_STATE
 
 # ================= TIME =================
 IST = pytz.timezone("Asia/Kolkata")
@@ -51,40 +47,43 @@ def log(level, msg):
     try:
         requests.post(
             WEBAPP_URL,
-            json={
-                "action": "pushLog",
-                "payload": {"level": level, "message": msg}
-            },
-            timeout=3
+            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
+            timeout=2
         )
     except Exception:
         pass
 
 def clear_logs():
     try:
-        requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
+        requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=2)
     except Exception:
         pass
 
-def fmt_ist(ts):
-    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
+# ================= SETTINGS (SAFE LOAD) =================
+def get_settings_safe():
+    try:
+        r = requests.post(
+            WEBAPP_URL,
+            json={"action": "getSettings"},
+            timeout=2
+        )
+        if r.ok:
+            return r.json().get("settings", {})
+    except Exception:
+        pass
+    return {}
+
+SETTINGS = get_settings_safe()
+
+BIAS_TIME_STR = SETTINGS.get("BIAS_TIME", "09:20:00")
+BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
+SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
+PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 500))
+MODE = SETTINGS.get("MODE", "PAPER")
 
 # ================= DEPLOY =================
 clear_logs()
-log("SYSTEM", "main.py DEPLOYED (ENTRY+SL COMBINED + WS FIXED)")
-
-# ================= SETTINGS =================
-def get_settings():
-    r = requests.post(WEBAPP_URL, json={"action": "getSettings"}, timeout=5)
-    return r.json().get("settings", {})
-
-SETTINGS = get_settings()
-
-BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
-BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
-SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
-PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
-MODE = SETTINGS.get("MODE", "PAPER")
+log("SYSTEM", "main.py DEPLOYED (FINAL SAFE VERSION)")
 
 # ================= TIME HELPERS =================
 def parse_bias_time_utc(tstr):
@@ -98,18 +97,6 @@ def candle_start(ts):
 def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-# ================= HISTORY =================
-def fetch_two_history_candles(symbol, end_ts):
-    res = fyers.history({
-        "symbol": symbol,
-        "resolution": "5",
-        "date_format": "0",
-        "range_from": int(end_ts - 600),
-        "range_to": int(end_ts - 1),
-        "cont_flag": "1"
-    })
-    return res.get("candles", []) if res.get("s") == "ok" else []
-
 # ================= STATE =================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -120,50 +107,28 @@ candles = {}
 last_base_vol = {}
 last_ws_base_before_bias = {}
 
-volume_history = {}
-lowest_counter = {}
-signal_counter = {}
-
 BT_FLOOR_TS = None
 bias_ts = None
-STOCK_BIAS_MAP = {}
 
 # ================= CLOSE CANDLE =================
 def close_live_candle(symbol, c):
-    prev_base = last_base_vol.get(symbol)
-    if prev_base is None:
+    prev = last_base_vol.get(symbol)
+    if prev is None:
         return
 
-    candle_vol = c["base_vol"] - prev_base
+    vol = c["base_vol"] - prev
     last_base_vol[symbol] = c["base_vol"]
 
-    volume_history.setdefault(symbol, []).append(candle_vol)
-
-    bias = STOCK_BIAS_MAP.get(symbol, "")
-    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
-    label = f"LIVE{offset + 3}"
-
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | {bias}")
+    log("VOLCHK", f"{symbol} | vol={round(vol,2)}")
 
     state = ORDER_STATE.get(symbol)
-
-    if (
-        state
-        and state.get("status") == "SL_PLACED"
-        and state.get("entry_price")
-        and state.get("entry_seen") is True
-    ):
+    if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
         qty = state["qty"]
         side = state["side"]
-        close_price = c["close"]
+        close = c["close"]
 
-        pl = (
-            (close_price - entry) * qty
-            if side == "BUY"
-            else (entry - close_price) * qty
-        )
-
+        pl = (close - entry) * qty if side == "BUY" else (entry - close) * qty
         log("ORDER", f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}")
 
 # ================= UPDATE CANDLE =================
@@ -174,15 +139,16 @@ def update_candle(msg):
         return
 
     ltp = msg.get("ltp")
-    base_vol = msg.get("vol_traded_today")
+    vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
 
-    if ltp is None or base_vol is None or ts is None:
+    if ltp is None or vol is None or ts is None:
         return
 
     if not BIAS_DONE and bias_ts and ts < bias_ts:
-        last_ws_base_before_bias[symbol] = base_vol
+        last_ws_base_before_bias[symbol] = vol
 
+    # LTP → order engine
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -191,11 +157,12 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
+    # Combined ENTRY + SL log (once)
     state = ORDER_STATE.get(symbol)
     if (
         state
         and state.get("status") == "SL_PLACED"
-        and state.get("entry_seen") is True
+        and state.get("entry_price")
         and not state.get("entry_sl_logged")
     ):
         log(
@@ -218,16 +185,16 @@ def update_candle(msg):
             "high": ltp,
             "low": ltp,
             "close": ltp,
-            "base_vol": base_vol
+            "base_vol": vol
         }
         return
 
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
-    c["base_vol"] = base_vol
+    c["base_vol"] = vol
 
-# ================= WS =================
+# ================= WEBSOCKET =================
 def on_message(msg):
     update_candle(msg)
 
@@ -249,11 +216,9 @@ threading.Thread(target=start_ws, daemon=True).start()
 
 # ================= CONTROLLER =================
 def controller():
-    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
+    global BT_FLOOR_TS, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
 
-    bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-    bias_ts = int(bias_dt.timestamp())
-
+    bias_ts = int(parse_bias_time_utc(BIAS_TIME_STR).timestamp())
     log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
     while datetime.now(UTC).timestamp() < bias_ts:
@@ -263,19 +228,10 @@ def controller():
     log("BIAS", "Bias calculation started")
 
     res = run_sector_bias()
-    strong = res.get("strong_sectors", [])
-    all_selected = res.get("selected_stocks", [])
-
-    for s in strong:
-        key = SECTOR_LIST.get(s["sector"])
-        bias = "B" if s["bias"] == "BUY" else "S"
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = bias
-
-    ACTIVE_SYMBOLS.update(all_selected)
+    ACTIVE_SYMBOLS.update(res.get("selected_stocks", []))
     BIAS_DONE = True
 
-    # 🔑 CRITICAL FIX: unsubscribe non-active symbols
+    # 🔑 CRITICAL: unsubscribe non-active symbols
     fyers_ws.unsubscribe(
         symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
         data_type="SymbolUpdate"
@@ -285,7 +241,7 @@ def controller():
 
 threading.Thread(target=controller, daemon=True).start()
 
-# ================= FLASK =================
+# ================= FLASK ROUTES =================
 @app.route("/")
 def health():
     return jsonify({"status": "ok"})
