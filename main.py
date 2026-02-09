@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STABLE BASE + OPEN MTM + REALIZED + NET (BATCH)
+# BASED ON STABLE VERSION + ENTRY+SL COMBINED (SAFE)
 # ============================================================
 
 import os
@@ -78,10 +78,10 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + MTM_BATCH)")
+log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + ENTRY_SL_COMBINED)")
 
 # ============================================================
-# SETTINGS
+# SETTINGS (NO DEFAULTS, SAFE RETRY)
 # ============================================================
 def get_settings():
     for _ in range(3):
@@ -95,14 +95,14 @@ def get_settings():
 
 SETTINGS = get_settings()
 
-BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
+BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")          # MUST come from sheet
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
 # ============================================================
-# HELPERS
+# TIME HELPERS
 # ============================================================
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -142,22 +142,17 @@ last_base_vol = {}
 last_ws_base_before_bias = {}
 
 volume_history = {}
+lowest_counter = {}
 signal_counter = {}
 
 BT_FLOOR_TS = None
 bias_ts = None
 STOCK_BIAS_MAP = {}
 
-# ===== NEW: MTM / REALIZED AGGREGATION =====
-OPEN_MTM_BUFFER = {}      # symbol -> pl
-REALIZED_PL_TOTAL = 0.0  # cumulative intraday
-
 # ============================================================
-# CLOSE LIVE CANDLE (5-MIN)
+# CLOSE LIVE CANDLE
 # ============================================================
 def close_live_candle(symbol, c):
-    global REALIZED_PL_TOTAL
-
     prev_base = last_base_vol.get(symbol)
     if prev_base is None:
         return
@@ -176,7 +171,7 @@ def close_live_candle(symbol, c):
 
     log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
 
-    # -------- OPEN MTM COLLECT (NO LOG HERE) --------
+    # -------- OPEN TRADE PL --------
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -185,7 +180,7 @@ def close_live_candle(symbol, c):
         close_price = c["close"]
 
         pl = (close_price - entry) * qty if side == "BUY" else (entry - close_price) * qty
-        OPEN_MTM_BUFFER[symbol] = round(pl, 2)
+        log("ORDER", f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}")
 
     # -------- SIGNAL GENERATION --------
     if is_lowest:
@@ -210,8 +205,6 @@ def close_live_candle(symbol, c):
 # UPDATE CANDLE (TICK LEVEL)
 # ============================================================
 def update_candle(msg):
-    global REALIZED_PL_TOTAL
-
     symbol = msg.get("symbol")
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
@@ -233,7 +226,7 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
-    # -------- ENTRY + SL COMBINED (ONCE) --------
+    # -------- ENTRY + SL COMBINED LOG (ONCE) --------
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -248,44 +241,12 @@ def update_candle(msg):
         )
         state["entry_sl_logged"] = True
 
-    # -------- REALIZED PL CAPTURE (ON SL HIT) --------
-    if state and state.get("status") == "SL_HIT" and not state.get("realized_counted"):
-        entry = state["entry_price"]
-        sl = state["sl_price"]
-        qty = state["qty"]
-        side = state["side"]
-
-        realized = (sl - entry) * qty if side == "BUY" else (entry - sl) * qty
-        REALIZED_PL_TOTAL += round(realized, 2)
-        state["realized_counted"] = True
-
     start = candle_start(ts)
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
-
-            # ===== BATCH TELEGRAM (ON CANDLE CLOSE) =====
-            if OPEN_MTM_BUFFER or REALIZED_PL_TOTAL != 0:
-                open_total = round(sum(OPEN_MTM_BUFFER.values()), 2)
-                net = round(open_total + REALIZED_PL_TOTAL, 2)
-
-                lines = []
-                for sym, pl in OPEN_MTM_BUFFER.items():
-                    lines.append(f"{sym}\nPL={pl}")
-
-                msg = (
-                    "OPEN_TRADE_PL_BATCH | "
-                    f"OPEN={open_total} | "
-                    f"REALIZED={round(REALIZED_PL_TOTAL,2)} | "
-                    f"NET={net} || "
-                    + " || ".join(lines)
-                )
-
-                log("ORDER", msg)
-                OPEN_MTM_BUFFER.clear()
-
         candles[symbol] = {
             "start": start,
             "open": ltp,
