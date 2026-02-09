@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STABLE VERSION + DEBUG ONLY (NO LOGIC CHANGE)
+# SECTOR ENGINE → LOCAL (NSE SAFE)
 # ============================================================
 
 import os
@@ -16,7 +16,6 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
-from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
@@ -36,6 +35,7 @@ CANDLE_INTERVAL = 300
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL")
+LOCAL_SECTOR_URL = os.getenv("LOCAL_SECTOR_URL")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
     raise RuntimeError("Missing ENV variables")
@@ -79,7 +79,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + DEBUG ONLY)")
+log("SYSTEM", "main.py FINAL DEPLOY (SECTOR ENGINE = LOCAL)")
 
 # ============================================================
 # SETTINGS
@@ -115,9 +115,6 @@ def parse_bias_time_utc(tstr):
 def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-def candle_start(ts):
-    return ts - (ts % CANDLE_INTERVAL)
-
 # ============================================================
 # STATE
 # ============================================================
@@ -125,15 +122,36 @@ ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
-candles = {}
-last_base_vol = {}
-last_ws_base_before_bias = {}
-volume_history = {}
-signal_counter = {}
+STOCK_BIAS_MAP = {}
 
 BT_FLOOR_TS = None
 bias_ts = None
-STOCK_BIAS_MAP = {}
+
+# ============================================================
+# LOCAL SECTOR ENGINE CALL
+# ============================================================
+def fetch_sector_bias_from_local():
+    if not LOCAL_SECTOR_URL:
+        log("ERROR", "LOCAL_SECTOR_URL not set")
+        return {"strong_sectors": [], "selected_stocks": []}
+
+    try:
+        r = requests.post(LOCAL_SECTOR_URL, timeout=25)
+        if r.ok:
+            data = r.json()
+            log(
+                "SYSTEM",
+                f"SECTOR_BIAS_FROM_LOCAL | "
+                f"sectors={len(data.get('strong_sectors', []))} "
+                f"stocks={len(data.get('selected_stocks', []))}"
+            )
+            return data
+        else:
+            log("ERROR", f"LOCAL_SECTOR_HTTP_{r.status_code}")
+    except Exception as e:
+        log("ERROR", f"LOCAL_SECTOR_FAIL | {e}")
+
+    return {"strong_sectors": [], "selected_stocks": []}
 
 # ============================================================
 # WEBSOCKET
@@ -192,7 +210,8 @@ def controller():
     BT_FLOOR_TS = floor_5min(bias_ts)
     log("BIAS", "Bias calculation started")
 
-    res = run_sector_bias()
+    # 🔥 ONLY CHANGE: LOCAL SECTOR ENGINE
+    res = fetch_sector_bias_from_local()
 
     strong = res.get("strong_sectors", [])
     all_selected = res.get("selected_stocks", [])
@@ -204,64 +223,22 @@ def controller():
     ACTIVE_SYMBOLS.clear()
 
     for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
+        key = s["sector"]
+        for sym in SECTOR_MAP.get(key.replace("NIFTY ", "").replace(" ", "_"), []):
             STOCK_BIAS_MAP[sym] = "B"
 
     for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
+        key = s["sector"]
+        for sym in SECTOR_MAP.get(key.replace("NIFTY ", "").replace(" ", "_"), []):
             STOCK_BIAS_MAP[sym] = "S"
-
-    log("DEBUG", f"STOCK_BIAS_MAP_count={len(STOCK_BIAS_MAP)}")
 
     ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-    log("SYSTEM", "History loaded – system LIVE")
+    log("SYSTEM", "System LIVE")
 
 threading.Thread(target=controller, daemon=True).start()
-
-# ============================================================
-# NSE DEBUG ROUTE (IMPORTANT)
-# ============================================================
-@app.route("/__nse_test")
-def nse_test():
-    log("DEBUG", "==== NSE TEST ROUTE HIT ====")
-    try:
-        url = "https://www.nseindia.com/api/equity-stockIndices"
-        params = {"index": "NIFTY IT"}
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com"
-        }
-
-        s = requests.Session()
-        s.headers.update(headers)
-        s.get("https://www.nseindia.com", timeout=5)
-
-        r = s.get(url, params=params, timeout=10)
-
-        log("DEBUG", f"NSE HTTP STATUS={r.status_code}")
-
-        if r.status_code != 200:
-            log("DEBUG", f"NSE BODY={r.text[:200]}")
-            return jsonify({"ok": False})
-
-        data = r.json()
-        rows = data.get("data", [])
-
-        log("DEBUG", f"NSE ROW COUNT={len(rows)}")
-        if rows:
-            log("DEBUG", f"NSE SAMPLE={json.dumps(rows[0])[:300]}")
-
-        return jsonify({"ok": True, "rows": len(rows)})
-
-    except Exception as e:
-        log("DEBUG", f"NSE ERROR={e}")
-        return jsonify({"ok": False, "error": str(e)})
 
 # ============================================================
 # FLASK ROUTES
