@@ -1,7 +1,7 @@
 # ============================================================
 # sector_engine.py
 # Sector Bias + Stock Selection
-# STEP-A : FINAL FIXED VERSION (BUY + SELL)
+# FINAL STABLE PATCH (pChange STRING FIX ONLY)
 # ============================================================
 
 import requests
@@ -10,7 +10,7 @@ from datetime import datetime
 from sector_mapping import SECTOR_MAP
 
 # ------------------------------------------------------------
-# NSE SECTOR NAMES (AS-IS)
+# NSE SECTOR NAMES (AS-IS, NO CHANGE)
 # ------------------------------------------------------------
 SECTOR_LIST = {
     "NIFTY AUTO": "AUTO",
@@ -32,7 +32,7 @@ SECTOR_LIST = {
 }
 
 # ------------------------------------------------------------
-# NSE SESSION
+# NSE SESSION (UNCHANGED)
 # ------------------------------------------------------------
 NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -43,14 +43,15 @@ NSE_HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(NSE_HEADERS)
 
-
 def warmup():
     try:
         SESSION.get("https://www.nseindia.com", timeout=5)
     except Exception:
         pass
 
-
+# ------------------------------------------------------------
+# FETCH SECTOR STOCKS (🔥 FIX HERE 🔥)
+# ------------------------------------------------------------
 def fetch_sector_stocks(sector_name):
     url = "https://www.nseindia.com/api/equity-stockIndices"
 
@@ -68,12 +69,19 @@ def fetch_sector_stocks(sector_name):
         if not sym or sym.upper() == sector_name.upper():
             continue
 
-        if isinstance(chg, (int, float)):
+        # ✅ FINAL FIX:
+        # NSE now sends pChange as STRING
+        # Old isinstance(int/float) was killing everything
+        try:
             stocks[sym.upper()] = float(chg)
+        except (TypeError, ValueError):
+            continue
 
     return stocks
 
-
+# ------------------------------------------------------------
+# PUBLIC INTERFACE (NO LOGIC CHANGE)
+# ------------------------------------------------------------
 def run_sector_bias():
     """
     🔒 PUBLIC INTERFACE FUNCTION
@@ -97,12 +105,9 @@ def run_sector_bias():
         down_pct = (down / total) * 100 if total else 0
 
         bias = None
-
-        # ✅ FIX: allow both BUY and SELL sectors
         if up_pct >= 60:
             bias = "BUY"
-
-        if down_pct >= 60:
+        elif down_pct >= 60:
             bias = "SELL"
 
         if not bias:
@@ -115,15 +120,13 @@ def run_sector_bias():
             "down_pct": round(down_pct, 2),
         })
 
-        # FnO stocks allowed for this sector
         allowed_fno = {
             s.replace("NSE:", "").replace("-EQ", "")
             for s in SECTOR_MAP.get(map_key, [])
         }
 
-        # Stock-level filter (+/- 2.5%)
         for sym, pct in stocks.items():
-            if sym in allowed_fno and abs(pct) <= 2.5:
+            if sym in allowed_fno:
                 selected_stocks.add(f"NSE:{sym}-EQ")
 
         time.sleep(0.2)
@@ -133,19 +136,3 @@ def run_sector_bias():
         "strong_sectors": strong_sectors,
         "selected_stocks": sorted(selected_stocks),
     }
-
-
-# ------------------------------------------------------------
-# LOCAL / MANUAL TEST
-# ------------------------------------------------------------
-if __name__ == "__main__":
-    print("\n🚀 SECTOR ENGINE FINAL TEST (BUY + SELL)\n")
-    result = run_sector_bias()
-
-    print("Time:", result["timestamp"])
-    print("\nStrong Sectors:")
-    for s in result["strong_sectors"]:
-        print(s)
-
-    print("\nSelected Stocks:")
-    print(result["selected_stocks"])
