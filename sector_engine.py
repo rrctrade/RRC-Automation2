@@ -1,7 +1,7 @@
 # ============================================================
 # sector_engine.py
 # Sector Bias + Stock Selection
-# FINAL PATCHED VERSION (NSE COOKIE FIX)
+# STEP-A : FINAL FIXED VERSION (BUY + SELL)
 # ============================================================
 
 import requests
@@ -32,38 +32,25 @@ SECTOR_LIST = {
 }
 
 # ------------------------------------------------------------
-# NSE SESSION (HARDENED)
+# NSE SESSION
 # ------------------------------------------------------------
 NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/",
-    "Connection": "keep-alive",
+    "Referer": "https://www.nseindia.com",
 }
 
 SESSION = requests.Session()
 SESSION.headers.update(NSE_HEADERS)
 
-# ------------------------------------------------------------
-# NSE WARMUP (CRITICAL FIX)
-# ------------------------------------------------------------
+
 def warmup():
-    """
-    NSE blocks API unless cookies are properly set.
-    This warmup sequence is mandatory.
-    """
     try:
         SESSION.get("https://www.nseindia.com", timeout=5)
-        time.sleep(0.5)
-        SESSION.get("https://www.nseindia.com/api/marketStatus", timeout=5)
-        time.sleep(0.5)
     except Exception:
         pass
 
-# ------------------------------------------------------------
-# FETCH SECTOR STOCKS
-# ------------------------------------------------------------
+
 def fetch_sector_stocks(sector_name):
     url = "https://www.nseindia.com/api/equity-stockIndices"
 
@@ -86,9 +73,7 @@ def fetch_sector_stocks(sector_name):
 
     return stocks
 
-# ------------------------------------------------------------
-# PUBLIC INTERFACE
-# ------------------------------------------------------------
+
 def run_sector_bias():
     """
     🔒 PUBLIC INTERFACE FUNCTION
@@ -112,9 +97,12 @@ def run_sector_bias():
         down_pct = (down / total) * 100 if total else 0
 
         bias = None
+
+        # ✅ FIX: allow both BUY and SELL sectors
         if up_pct >= 60:
             bias = "BUY"
-        elif down_pct >= 60:
+
+        if down_pct >= 60:
             bias = "SELL"
 
         if not bias:
@@ -127,14 +115,15 @@ def run_sector_bias():
             "down_pct": round(down_pct, 2),
         })
 
+        # FnO stocks allowed for this sector
         allowed_fno = {
             s.replace("NSE:", "").replace("-EQ", "")
             for s in SECTOR_MAP.get(map_key, [])
         }
 
-        # STOCK FILTER (UNCHANGED)
+        # Stock-level filter (+/- 2.5%)
         for sym, pct in stocks.items():
-            if sym in allowed_fno:
+            if sym in allowed_fno and abs(pct) <= 2.5:
                 selected_stocks.add(f"NSE:{sym}-EQ")
 
         time.sleep(0.2)
@@ -144,3 +133,19 @@ def run_sector_bias():
         "strong_sectors": strong_sectors,
         "selected_stocks": sorted(selected_stocks),
     }
+
+
+# ------------------------------------------------------------
+# LOCAL / MANUAL TEST
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    print("\n🚀 SECTOR ENGINE FINAL TEST (BUY + SELL)\n")
+    result = run_sector_bias()
+
+    print("Time:", result["timestamp"])
+    print("\nStrong Sectors:")
+    for s in result["strong_sectors"]:
+        print(s)
+
+    print("\nSelected Stocks:")
+    print(result["selected_stocks"])
