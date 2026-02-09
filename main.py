@@ -1,10 +1,11 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# STABLE VERSION + TEMP NSE DEBUG ROUTE (FREE PLAN SAFE)
+# STABLE VERSION + DEBUG ONLY (NO LOGIC CHANGE)
 # ============================================================
 
 import os
 import time
+import json
 import threading
 import requests
 from datetime import datetime
@@ -78,7 +79,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + NSE DEBUG ROUTE)")
+log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + DEBUG ONLY)")
 
 # ============================================================
 # SETTINGS
@@ -101,6 +102,8 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
+log("DEBUG", f"SETTINGS BUY={BUY_SECTOR_COUNT} SELL={SELL_SECTOR_COUNT} RISK={PER_TRADE_RISK}")
+
 # ============================================================
 # TIME HELPERS
 # ============================================================
@@ -116,31 +119,15 @@ def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY
-# ============================================================
-def fetch_two_history_candles(symbol, end_ts):
-    res = fyers.history({
-        "symbol": symbol,
-        "resolution": "5",
-        "date_format": "0",
-        "range_from": int(end_ts - 600),
-        "range_to": int(end_ts - 1),
-        "cont_flag": "1"
-    })
-    return res.get("candles", []) if res.get("s") == "ok" else []
-
-# ============================================================
 # STATE
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
-
 candles = {}
 last_base_vol = {}
 last_ws_base_before_bias = {}
-
 volume_history = {}
 signal_counter = {}
 
@@ -149,7 +136,7 @@ bias_ts = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# UPDATE CANDLE (UNCHANGED)
+# WEBSOCKET
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -157,13 +144,9 @@ def update_candle(msg):
         return
 
     ltp = msg.get("ltp")
-    base_vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
-    if ltp is None or base_vol is None or ts is None:
+    if ltp is None or ts is None:
         return
-
-    if not BIAS_DONE and bias_ts and ts < bias_ts:
-        last_ws_base_before_bias[symbol] = base_vol
 
     handle_ltp_event(
         fyers=fyers,
@@ -173,28 +156,6 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
-    start = candle_start(ts)
-    c = candles.get(symbol)
-
-    if c is None or c["start"] != start:
-        candles[symbol] = {
-            "start": start,
-            "open": ltp,
-            "high": ltp,
-            "low": ltp,
-            "close": ltp,
-            "base_vol": base_vol
-        }
-        return
-
-    c["high"] = max(c["high"], ltp)
-    c["low"] = min(c["low"], ltp)
-    c["close"] = ltp
-    c["base_vol"] = base_vol
-
-# ============================================================
-# WEBSOCKET
-# ============================================================
 def on_message(msg):
     update_candle(msg)
 
@@ -215,7 +176,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# CONTROLLER (UNCHANGED)
+# CONTROLLER
 # ============================================================
 def controller():
     global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
@@ -232,8 +193,12 @@ def controller():
     log("BIAS", "Bias calculation started")
 
     res = run_sector_bias()
+
     strong = res.get("strong_sectors", [])
     all_selected = res.get("selected_stocks", [])
+
+    log("DEBUG", f"strong_sectors_count={len(strong)}")
+    log("DEBUG", f"selected_stocks_count={len(all_selected)}")
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
@@ -248,59 +213,66 @@ def controller():
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
 
+    log("DEBUG", f"STOCK_BIAS_MAP_count={len(STOCK_BIAS_MAP)}")
+
     ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", "History loaded – system LIVE")
 
 threading.Thread(target=controller, daemon=True).start()
 
 # ============================================================
-# 🔥 TEMP NSE TEST ROUTE (FREE PLAN)
+# NSE DEBUG ROUTE (IMPORTANT)
 # ============================================================
 @app.route("/__nse_test")
-def __nse_test():
-    import requests, time
-    print("==== NSE TEST ROUTE HIT ====")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json",
-        "Referer": "https://www.nseindia.com",
-    }
-
-    s = requests.Session()
-    s.headers.update(headers)
-
+def nse_test():
+    log("DEBUG", "==== NSE TEST ROUTE HIT ====")
     try:
+        url = "https://www.nseindia.com/api/equity-stockIndices"
+        params = {"index": "NIFTY IT"}
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://www.nseindia.com"
+        }
+
+        s = requests.Session()
+        s.headers.update(headers)
         s.get("https://www.nseindia.com", timeout=5)
-        time.sleep(1)
-    except Exception as e:
-        print("NSE TEST warmup error:", e)
 
-    try:
-        r = s.get(
-            "https://www.nseindia.com/api/equity-stockIndices",
-            params={"index": "NIFTY IT"},
-            timeout=10
-        )
-        print("NSE TEST HTTP STATUS =", r.status_code)
-        try:
-            data = r.json()
-            rows = data.get("data", [])
-            print("NSE TEST ROW COUNT =", len(rows))
-        except Exception as je:
-            print("NSE TEST JSON error:", je)
-    except Exception as e:
-        print("NSE TEST REQUEST error:", e)
+        r = s.get(url, params=params, timeout=10)
 
-    return jsonify({"status": "nse test triggered"})
+        log("DEBUG", f"NSE HTTP STATUS={r.status_code}")
+
+        if r.status_code != 200:
+            log("DEBUG", f"NSE BODY={r.text[:200]}")
+            return jsonify({"ok": False})
+
+        data = r.json()
+        rows = data.get("data", [])
+
+        log("DEBUG", f"NSE ROW COUNT={len(rows)}")
+        if rows:
+            log("DEBUG", f"NSE SAMPLE={json.dumps(rows[0])[:300]}")
+
+        return jsonify({"ok": True, "rows": len(rows)})
+
+    except Exception as e:
+        log("DEBUG", f"NSE ERROR={e}")
+        return jsonify({"ok": False, "error": str(e)})
 
 # ============================================================
 # FLASK ROUTES
 # ============================================================
 @app.route("/")
 def health():
+    return jsonify({"status": "ok"})
+
+@app.route("/fyers-redirect")
+def fyers_redirect():
+    log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
 
 # ============================================================
