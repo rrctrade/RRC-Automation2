@@ -123,7 +123,7 @@ def run_sector_bias():
 
         # Stock-level filter (+/- 2.5%)
         for sym, pct in stocks.items():
-            if sym in allowed_fno and abs(pct) <= 2.5:
+            if sym in allowed_fno and abs(pct) <= 5:
                 selected_stocks.add(f"NSE:{sym}-EQ")
 
         time.sleep(0.2)
