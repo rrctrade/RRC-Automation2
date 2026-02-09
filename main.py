@@ -1,16 +1,16 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# SECTOR ENGINE → LOCAL (NSE SAFE)
+# NSE REMOVED FROM RENDER | LOCAL PUSH ENABLED
+# Bias Time + History Candle Logic UNCHANGED
 # ============================================================
 
 import os
 import time
-import json
 import threading
 import requests
 from datetime import datetime
 import pytz
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -35,7 +35,6 @@ CANDLE_INTERVAL = 300
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL")
-LOCAL_SECTOR_URL = os.getenv("LOCAL_SECTOR_URL")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
     raise RuntimeError("Missing ENV variables")
@@ -56,7 +55,7 @@ fyers = fyersModel.FyersModel(
 # ============================================================
 def log(level, msg):
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {level} | {msg}", flush=True)
+    print(f"[{ts} IST] {level} | {msg}", flush=True)
     try:
         requests.post(
             WEBAPP_URL,
@@ -72,14 +71,11 @@ def clear_logs():
     except Exception:
         pass
 
-def fmt_ist(ts):
-    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
-
 # ============================================================
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY (SECTOR ENGINE = LOCAL)")
+log("SYSTEM", "main.py DEPLOYED (LOCAL SECTOR PUSH MODE)")
 
 # ============================================================
 # SETTINGS
@@ -96,16 +92,19 @@ def get_settings():
 
 SETTINGS = get_settings()
 
-BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
+BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")   # 🔒 AS-IS
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
-log("DEBUG", f"SETTINGS BUY={BUY_SECTOR_COUNT} SELL={SELL_SECTOR_COUNT} RISK={PER_TRADE_RISK}")
+log(
+    "SYSTEM",
+    f"Waiting for BIAS_TIME={BIAS_TIME_STR} | MODE={MODE}"
+)
 
 # ============================================================
-# TIME HELPERS
+# TIME HELPERS (UNCHANGED)
 # ============================================================
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -121,48 +120,24 @@ def floor_5min(ts):
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 ACTIVE_SYMBOLS = set()
-BIAS_DONE = False
 STOCK_BIAS_MAP = {}
+BIAS_DONE = False
 
 BT_FLOOR_TS = None
 bias_ts = None
 
 # ============================================================
-# LOCAL SECTOR ENGINE CALL
-# ============================================================
-def fetch_sector_bias_from_local():
-    if not LOCAL_SECTOR_URL:
-        log("ERROR", "LOCAL_SECTOR_URL not set")
-        return {"strong_sectors": [], "selected_stocks": []}
-
-    try:
-        r = requests.post(LOCAL_SECTOR_URL, timeout=25)
-        if r.ok:
-            data = r.json()
-            log(
-                "SYSTEM",
-                f"SECTOR_BIAS_FROM_LOCAL | "
-                f"sectors={len(data.get('strong_sectors', []))} "
-                f"stocks={len(data.get('selected_stocks', []))}"
-            )
-            return data
-        else:
-            log("ERROR", f"LOCAL_SECTOR_HTTP_{r.status_code}")
-    except Exception as e:
-        log("ERROR", f"LOCAL_SECTOR_FAIL | {e}")
-
-    return {"strong_sectors": [], "selected_stocks": []}
-
-# ============================================================
-# WEBSOCKET
+# WEBSOCKET (UNCHANGED)
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
+
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
 
     ltp = msg.get("ltp")
     ts = msg.get("exch_feed_time")
+
     if ltp is None or ts is None:
         return
 
@@ -194,51 +169,58 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# CONTROLLER
+# CONTROLLER (BIAS TIME LOGIC PRESERVED)
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
+    global BT_FLOOR_TS, bias_ts
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     bias_ts = int(bias_dt.timestamp())
-
-    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
 
     while datetime.now(UTC).timestamp() < bias_ts:
         time.sleep(1)
 
     BT_FLOOR_TS = floor_5min(bias_ts)
-    log("BIAS", "Bias calculation started")
+    log("BIAS", "Bias time reached – waiting for LOCAL sector push")
 
-    # 🔥 ONLY CHANGE: LOCAL SECTOR ENGINE
-    res = fetch_sector_bias_from_local()
+threading.Thread(target=controller, daemon=True).start()
 
-    strong = res.get("strong_sectors", [])
-    all_selected = res.get("selected_stocks", [])
+# ============================================================
+# 🔥 LOCAL → RENDER SECTOR PUSH ENDPOINT
+# ============================================================
+@app.route("/push-sector-bias", methods=["POST"])
+def push_sector_bias():
+    global STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
 
-    log("DEBUG", f"strong_sectors_count={len(strong)}")
-    log("DEBUG", f"selected_stocks_count={len(all_selected)}")
+    data = request.json or {}
+
+    strong = data.get("strong_sectors", [])
+    selected = data.get("selected_stocks", [])
+
+    log(
+        "SYSTEM",
+        f"SECTOR_BIAS_PUSHED | sectors={len(strong)} stocks={len(selected)}"
+    )
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
     for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
-        key = s["sector"]
-        for sym in SECTOR_MAP.get(key.replace("NIFTY ", "").replace(" ", "_"), []):
+        key = s["sector"].replace("NIFTY ", "").replace(" ", "_")
+        for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
 
     for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
-        key = s["sector"]
-        for sym in SECTOR_MAP.get(key.replace("NIFTY ", "").replace(" ", "_"), []):
+        key = s["sector"].replace("NIFTY ", "").replace(" ", "_")
+        for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
 
-    ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
+    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
-    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-    log("SYSTEM", "System LIVE")
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)} | SYSTEM LIVE")
 
-threading.Thread(target=controller, daemon=True).start()
+    return jsonify({"ok": True})
 
 # ============================================================
 # FLASK ROUTES
