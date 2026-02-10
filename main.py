@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
 # MODE: LOCAL SECTOR PUSH + STABLE SECTOR LOGIC
+# LOG: ACTIVE SECTORS ONLY (NO STOCK-LEVEL NOISE)
 # ============================================================
 
 import os
@@ -77,7 +78,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py DEPLOYED | MODE=LOCAL_SECTOR_PUSH | STABLE_LOGIC")
+log("SYSTEM", "main.py DEPLOYED | MODE=LOCAL_SECTOR_PUSH | ACTIVE_SECTOR_LOG_ONLY")
 
 # ============================================================
 # SETTINGS
@@ -129,12 +130,6 @@ SECTOR_NAME_TO_KEY = {
     "NIFTY BANK": "BANK",
     "NIFTY 50": "NIFTY50",
 }
-
-# Reverse mapping: stock -> sector name
-STOCK_TO_SECTOR_NAME = {}
-for sector_name, key in SECTOR_NAME_TO_KEY.items():
-    for s in SECTOR_MAP.get(key, []):
-        STOCK_TO_SECTOR_NAME[s] = sector_name
 
 # ============================================================
 # TIME HELPERS
@@ -355,13 +350,23 @@ def push_sector_bias():
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
+    active_sector_logs = []
+
     for s in buy_sectors:
-        key = SECTOR_NAME_TO_KEY.get(s["sector"])
+        sec_name = s["sector"]
+        key = SECTOR_NAME_TO_KEY.get(sec_name)
+        if not key:
+            continue
+        active_sector_logs.append(f"{sec_name} (BUY)")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
 
     for s in sell_sectors:
-        key = SECTOR_NAME_TO_KEY.get(s["sector"])
+        sec_name = s["sector"]
+        key = SECTOR_NAME_TO_KEY.get(sec_name)
+        if not key:
+            continue
+        active_sector_logs.append(f"{sec_name} (SELL)")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
 
@@ -375,11 +380,8 @@ def push_sector_bias():
     )
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
-    for sym in sorted(ACTIVE_SYMBOLS):
-        sec = STOCK_TO_SECTOR_NAME.get(sym, "UNKNOWN")
-        bias = STOCK_BIAS_MAP.get(sym)
-        log("SYSTEM", f"ACTIVE_STOCK | {sym} | SECTOR={sec} | BIAS={bias}")
+    for sec in active_sector_logs:
+        log("SYSTEM", f"ACTIVE_SECTOR | {sec}")
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
