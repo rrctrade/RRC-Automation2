@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# MODE: LOCAL SECTOR PUSH (FULL SETTINGS SUPPORT)
+# MODE: LOCAL SECTOR PUSH + STABLE SECTOR LOGIC
 # ============================================================
 
 import os
@@ -77,7 +77,7 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py DEPLOYED | MODE=LOCAL_SECTOR_PUSH")
+log("SYSTEM", "main.py DEPLOYED | MODE=LOCAL_SECTOR_PUSH | STABLE_LOGIC")
 
 # ============================================================
 # SETTINGS
@@ -107,6 +107,34 @@ log(
     f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT} | "
     f"PER_TRADE_RISK={PER_TRADE_RISK}"
 )
+
+# ============================================================
+# SECTOR NAME MAP (LOCKED)
+# ============================================================
+SECTOR_NAME_TO_KEY = {
+    "NIFTY AUTO": "AUTO",
+    "NIFTY FINANCIAL SERVICES": "FINANCIAL_SERVICES",
+    "NIFTY FIN SERVICE EX BANK": "FIN_SERVICES_EX_BANK",
+    "NIFTY FMCG": "FMCG",
+    "NIFTY IT": "IT",
+    "NIFTY MEDIA": "MEDIA",
+    "NIFTY METAL": "METAL",
+    "NIFTY PHARMA": "PHARMA",
+    "NIFTY PSU BANK": "PSU_BANK",
+    "NIFTY PRIVATE BANK": "PRIVATE_BANK",
+    "NIFTY REALTY": "REALTY",
+    "NIFTY CONSUMER DURABLES": "CONSUMER_DURABLES",
+    "NIFTY OIL & GAS": "OIL_GAS",
+    "NIFTY CHEMICALS": "CHEMICALS",
+    "NIFTY BANK": "BANK",
+    "NIFTY 50": "NIFTY50",
+}
+
+# Reverse mapping: stock -> sector name
+STOCK_TO_SECTOR_NAME = {}
+for sector_name, key in SECTOR_NAME_TO_KEY.items():
+    for s in SECTOR_MAP.get(key, []):
+        STOCK_TO_SECTOR_NAME[s] = sector_name
 
 # ============================================================
 # TIME HELPERS
@@ -319,7 +347,7 @@ def push_sector_bias():
 
     data = request.json or {}
     strong = data.get("strong_sectors", [])
-    selected = set(data.get("selected_stocks", []))
+    all_selected = set(data.get("selected_stocks", []))
 
     buy_sectors = [s for s in strong if s.get("bias") == "BUY"][:BUY_SECTOR_COUNT]
     sell_sectors = [s for s in strong if s.get("bias") == "SELL"][:SELL_SECTOR_COUNT]
@@ -327,13 +355,17 @@ def push_sector_bias():
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for sym in selected:
-        for _ in buy_sectors:
+    for s in buy_sectors:
+        key = SECTOR_NAME_TO_KEY.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
-        for _ in sell_sectors:
+
+    for s in sell_sectors:
+        key = SECTOR_NAME_TO_KEY.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
 
-    ACTIVE_SYMBOLS = set(STOCK_BIAS_MAP.keys())
+    ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
     WAITING_FOR_LOCAL_PUSH = False
 
@@ -342,7 +374,12 @@ def push_sector_bias():
         data_type="SymbolUpdate"
     )
 
-    log("SYSTEM", f"SECTOR_BIAS_PUSHED | ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+    for sym in sorted(ACTIVE_SYMBOLS):
+        sec = STOCK_TO_SECTOR_NAME.get(sym, "UNKNOWN")
+        bias = STOCK_BIAS_MAP.get(sym)
+        log("SYSTEM", f"ACTIVE_STOCK | {sym} | SECTOR={sec} | BIAS={bias}")
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
