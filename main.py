@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# BASED ON STABLE VERSION + ENTRY+SL COMBINED (SAFE)
+# MODE: LOCAL SECTOR PUSH (NO NSE CALLS ON RENDER)
 # ============================================================
 
 import os
@@ -9,13 +9,12 @@ import threading
 import requests
 from datetime import datetime
 import pytz
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
-from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
@@ -78,10 +77,10 @@ def fmt_ist(ts):
 # CLEAR LOGS ON DEPLOY
 # ============================================================
 clear_logs()
-log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + ENTRY_SL_COMBINED)")
+log("SYSTEM", "main.py DEPLOYED | MODE=LOCAL_SECTOR_PUSH")
 
 # ============================================================
-# SETTINGS (NO DEFAULTS, SAFE RETRY)
+# SETTINGS
 # ============================================================
 def get_settings():
     for _ in range(3):
@@ -91,13 +90,11 @@ def get_settings():
                 return r.json().get("settings", {})
         except Exception:
             time.sleep(1)
-    raise RuntimeError("Unable to fetch Settings from WebApp")
+    raise RuntimeError("Unable to fetch Settings")
 
 SETTINGS = get_settings()
 
-BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")          # MUST come from sheet
-BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
-SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
+BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
@@ -109,10 +106,10 @@ def parse_bias_time_utc(tstr):
     ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
     return ist_dt.astimezone(UTC)
 
-def floor_5min(ts):
+def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
-def candle_start(ts):
+def floor_5min(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
@@ -135,19 +132,19 @@ def fetch_two_history_candles(symbol, end_ts):
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 ACTIVE_SYMBOLS = set()
+STOCK_BIAS_MAP = {}
 BIAS_DONE = False
+WAITING_FOR_LOCAL_PUSH = False
 
 candles = {}
 last_base_vol = {}
 last_ws_base_before_bias = {}
 
 volume_history = {}
-lowest_counter = {}
 signal_counter = {}
 
 BT_FLOOR_TS = None
 bias_ts = None
-STOCK_BIAS_MAP = {}
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -178,7 +175,6 @@ def close_live_candle(symbol, c):
         qty = state["qty"]
         side = state["side"]
         close_price = c["close"]
-
         pl = (close_price - entry) * qty if side == "BUY" else (entry - close_price) * qty
         log("ORDER", f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}")
 
@@ -202,7 +198,7 @@ def close_live_candle(symbol, c):
             )
 
 # ============================================================
-# UPDATE CANDLE (TICK LEVEL)
+# UPDATE CANDLE
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -226,7 +222,6 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
-    # -------- ENTRY + SL COMBINED LOG (ONCE) --------
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -285,10 +280,10 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# CONTROLLER
+# CONTROLLER (WAIT ONLY)
 # ============================================================
 def controller():
-    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
+    global bias_ts, BT_FLOOR_TS, WAITING_FOR_LOCAL_PUSH
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     bias_ts = int(bias_dt.timestamp())
@@ -299,34 +294,47 @@ def controller():
         time.sleep(1)
 
     BT_FLOOR_TS = floor_5min(bias_ts)
-    log("BIAS", "Bias calculation started")
+    WAITING_FOR_LOCAL_PUSH = True
+    log("SYSTEM", "Bias time reached – waiting for LOCAL sector push")
 
-    res = run_sector_bias()
-    strong = res.get("strong_sectors", [])
-    all_selected = res.get("selected_stocks", [])
+threading.Thread(target=controller, daemon=True).start()
+
+# ============================================================
+# LOCAL PUSH ENDPOINT
+# ============================================================
+@app.route("/push-sector-bias", methods=["POST"])
+def push_sector_bias():
+    global ACTIVE_SYMBOLS, STOCK_BIAS_MAP, BIAS_DONE, WAITING_FOR_LOCAL_PUSH
+
+    if not WAITING_FOR_LOCAL_PUSH:
+        return jsonify({"ok": False, "error": "Not ready"}), 400
+
+    data = request.json or {}
+    strong = data.get("strong_sectors", [])
+    selected = set(data.get("selected_stocks", []))
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "B"
+    for s in strong:
+        bias = s.get("bias")
+        sector = s.get("sector")
+        if bias not in ("BUY", "SELL"):
+            continue
 
-    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "S"
+        for sym in selected:
+            STOCK_BIAS_MAP[sym] = "B" if bias == "BUY" else "S"
 
-    ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
+    ACTIVE_SYMBOLS = set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
+    WAITING_FOR_LOCAL_PUSH = False
 
     fyers_ws.unsubscribe(
         symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
         data_type="SymbolUpdate"
     )
 
-    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", f"SECTOR_BIAS_PUSHED | ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
@@ -340,8 +348,7 @@ def controller():
             log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
-
-threading.Thread(target=controller, daemon=True).start()
+    return jsonify({"ok": True})
 
 # ============================================================
 # FLASK ROUTES
