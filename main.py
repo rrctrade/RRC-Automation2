@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# MODE: LOCAL SECTOR PUSH (NO NSE CALLS ON RENDER)
+# MODE: LOCAL SECTOR PUSH (FULL SETTINGS SUPPORT)
 # ============================================================
 
 import os
@@ -95,8 +95,18 @@ def get_settings():
 SETTINGS = get_settings()
 
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
+BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
+SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
+
+log(
+    "SYSTEM",
+    f"SETTINGS | BIAS_TIME={BIAS_TIME_STR} | "
+    f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT} | "
+    f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT} | "
+    f"PER_TRADE_RISK={PER_TRADE_RISK}"
+)
 
 # ============================================================
 # TIME HELPERS
@@ -168,7 +178,6 @@ def close_live_candle(symbol, c):
 
     log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
 
-    # -------- OPEN TRADE PL --------
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -178,7 +187,6 @@ def close_live_candle(symbol, c):
         pl = (close_price - entry) * qty if side == "BUY" else (entry - close_price) * qty
         log("ORDER", f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}")
 
-    # -------- SIGNAL GENERATION --------
     if is_lowest:
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
@@ -280,7 +288,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# CONTROLLER (WAIT ONLY)
+# CONTROLLER
 # ============================================================
 def controller():
     global bias_ts, BT_FLOOR_TS, WAITING_FOR_LOCAL_PUSH
@@ -313,17 +321,17 @@ def push_sector_bias():
     strong = data.get("strong_sectors", [])
     selected = set(data.get("selected_stocks", []))
 
+    buy_sectors = [s for s in strong if s.get("bias") == "BUY"][:BUY_SECTOR_COUNT]
+    sell_sectors = [s for s in strong if s.get("bias") == "SELL"][:SELL_SECTOR_COUNT]
+
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in strong:
-        bias = s.get("bias")
-        sector = s.get("sector")
-        if bias not in ("BUY", "SELL"):
-            continue
-
-        for sym in selected:
-            STOCK_BIAS_MAP[sym] = "B" if bias == "BUY" else "S"
+    for sym in selected:
+        for _ in buy_sectors:
+            STOCK_BIAS_MAP[sym] = "B"
+        for _ in sell_sectors:
+            STOCK_BIAS_MAP[sym] = "S"
 
     ACTIVE_SYMBOLS = set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
