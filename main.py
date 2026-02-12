@@ -1,6 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – FINAL HYBRID MAIN
+# RajanTradeAutomation – FINAL HYBRID PRODUCTION MAIN
 # LOCAL SECTOR PUSH + FULL CANDLE ENGINE + CLEAN EXECUTION
+# WITH SECTOR FILTER + FYERS REDIRECT PRESERVED
 # ============================================================
 
 import os
@@ -15,7 +16,7 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
-from sector_engine import SECTOR_LIST   # Only mapping use
+from sector_engine import SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
@@ -75,7 +76,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "HYBRID FULL CANDLE ENGINE DEPLOYED")
+log("SYSTEM", "HYBRID FULL CANDLE ENGINE DEPLOYED (FINAL)")
 
 # ============================================================
 # SETTINGS
@@ -109,11 +110,8 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-last_ws_base_before_bias = {}
-
 volume_history = {}
 signal_counter = {}
-
 BT_FLOOR_TS = None
 
 # ============================================================
@@ -213,6 +211,7 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
+    # SINGLE EXECUTION LOG
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -249,7 +248,7 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# SECTOR PUSH ROUTE (🔥 KEY)
+# SECTOR PUSH ROUTE
 # ============================================================
 @app.route("/push-sector-bias", methods=["POST"])
 def push_sector_bias():
@@ -260,17 +259,29 @@ def push_sector_bias():
     all_selected = data.get("selected_stocks", [])
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-    bias_ts = int(bias_dt.timestamp())
-    BT_FLOOR_TS = floor_5min(bias_ts)
+    BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in strong:
+    buy_sectors = [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]
+    sell_sectors = [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
+
+    for s in buy_sectors:
+        log("BIAS", f"ACTIVE_SECTOR BUY  → {s['sector']}")
+
+    for s in sell_sectors:
+        log("BIAS", f"ACTIVE_SECTOR SELL → {s['sector']}")
+
+    for s in buy_sectors:
         key = SECTOR_LIST.get(s["sector"])
-        bias_flag = "B" if s["bias"] == "BUY" else "S"
         for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = bias_flag
+            STOCK_BIAS_MAP[sym] = "B"
+
+    for s in sell_sectors:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "S"
 
     ACTIVE_SYMBOLS = set(all_selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
@@ -280,20 +291,17 @@ def push_sector_bias():
         data_type="SymbolUpdate"
     )
 
-    log("SYSTEM", f"SECTOR PUSH RECEIVED | Active={len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
-    # HISTORY LOAD
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
         history = fetch_two_history_candles(s, BT_FLOOR_TS)
         for ts, o, h, l, c, v in history[:2]:
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
-
         last_base_vol[s] = history[-1][5] if history else 0
 
     log("SYSTEM", "History loaded – LIVE started")
-
     return jsonify({"ok": True})
 
 # ============================================================
@@ -327,6 +335,7 @@ def health():
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
+    log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
 
 # ============================================================
