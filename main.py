@@ -1,7 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – HYBRID FINAL main.py
-# LOCAL BIAS → RENDER EXECUTION ENGINE
-# FYERS REDIRECT SAFE VERSION
+# RajanTradeAutomation – ORIGINAL STABLE + LOCAL BIAS PUSH
+# ONLY CHANGE: Bias आता Local push वरून येईल
+# बाकी सर्व logic जसाच्या तसा
 # ============================================================
 
 import os
@@ -16,6 +16,7 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
+from sector_engine import SECTOR_LIST   # run_sector_bias REMOVED
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
@@ -71,8 +72,11 @@ def clear_logs():
     except Exception:
         pass
 
+def fmt_ist(ts):
+    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
+
 clear_logs()
-log("SYSTEM", "HYBRID FINAL DEPLOY START")
+log("SYSTEM", "ORIGINAL STABLE ENGINE – WAITING FOR LOCAL BIAS")
 
 # ============================================================
 # SETTINGS
@@ -95,43 +99,47 @@ PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
 # ============================================================
-# STATE
+# STATE (UNCHANGED)
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 ACTIVE_SYMBOLS = set()
-STOCK_BIAS_MAP = {}
 BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
+last_ws_base_before_bias = {}
+
 volume_history = {}
 signal_counter = {}
 
+BT_FLOOR_TS = None
+bias_ts = None
+STOCK_BIAS_MAP = {}
+
 # ============================================================
-# HISTORY
+# HISTORY (UNCHANGED)
 # ============================================================
-def fetch_two_history_candles(symbol):
-    now = int(datetime.now(UTC).timestamp())
+def fetch_two_history_candles(symbol, end_ts):
     res = fyers.history({
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": now - 600,
-        "range_to": now - 1,
+        "range_from": int(end_ts - 600),
+        "range_to": int(end_ts - 1),
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE
+# CLOSE CANDLE (UNCHANGED)
 # ============================================================
 def close_live_candle(symbol, c):
-    prev = last_base_vol.get(symbol)
-    if prev is None:
+    prev_base = last_base_vol.get(symbol)
+    if prev_base is None:
         return
 
-    candle_vol = c["base_vol"] - prev
+    candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
@@ -141,7 +149,10 @@ def close_live_candle(symbol, c):
     color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
-    log("VOLCHK", f"{symbol} | vol={round(candle_vol,2)} | lowest={is_lowest} | {color} {bias}")
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
+
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
 
     if is_lowest:
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
@@ -162,17 +173,24 @@ def close_live_candle(symbol, c):
             )
 
 # ============================================================
-# UPDATE CANDLE
+# UPDATE CANDLE (UNCHANGED)
 # ============================================================
 def update_candle(msg):
-    symbol = msg.get("symbol")
-    if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
-        return
+    global bias_ts
 
+    symbol = msg.get("symbol")
     ltp = msg.get("ltp")
     base_vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
+
     if ltp is None or base_vol is None or ts is None:
+        return
+
+    if not BIAS_DONE:
+        last_ws_base_before_bias[symbol] = base_vol
+        return
+
+    if symbol not in ACTIVE_SYMBOLS:
         return
 
     handle_ltp_event(
@@ -197,7 +215,6 @@ def update_candle(msg):
             "close": ltp,
             "base_vol": base_vol
         }
-        last_base_vol.setdefault(symbol, base_vol)
         return
 
     c["high"] = max(c["high"], ltp)
@@ -206,7 +223,7 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# WEBSOCKET
+# WEBSOCKET (UNCHANGED)
 # ============================================================
 def on_message(msg):
     update_candle(msg)
@@ -228,32 +245,39 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# HYBRID BIAS RECEIVE
+# LOCAL BIAS RECEIVE (ONLY CHANGE)
 # ============================================================
 @app.route("/push-sector-bias", methods=["POST"])
 def receive_bias():
 
-    global ACTIVE_SYMBOLS, STOCK_BIAS_MAP, BIAS_DONE
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
 
     data = request.get_json(force=True)
 
     strong = data.get("strong_sectors", [])
     selected = data.get("selected_stocks", [])
 
+    # Bias time NOW (aligned to 5min)
+    bias_ts = int(datetime.now(UTC).timestamp())
+    BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
+
+    log("BIAS", "Bias received from LOCAL")
+
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in strong[:BUY_SECTOR_COUNT]:
-        if s["bias"] == "BUY":
-            for sym in selected:
-                STOCK_BIAS_MAP[sym] = "B"
+    # ORIGINAL sector filtering logic
+    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "B"
 
-    for s in strong[:SELL_SECTOR_COUNT]:
-        if s["bias"] == "SELL":
-            for sym in selected:
-                STOCK_BIAS_MAP[sym] = "S"
+    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "S"
 
-    ACTIVE_SYMBOLS = set(selected)
+    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
     fyers_ws.unsubscribe(
@@ -261,33 +285,35 @@ def receive_bias():
         data_type="SymbolUpdate"
     )
 
-    log("SYSTEM", f"BIAS RECEIVED | ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
+    # ORIGINAL history logic
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
-        history = fetch_two_history_candles(s)
+        history = fetch_two_history_candles(s, BT_FLOOR_TS)
         for ts, o, h, l, c, v in history[:2]:
             volume_history[s].append(v)
+            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-    log("SYSTEM", "History loaded – LIVE started")
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+
+    log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
 
 # ============================================================
-# HEALTH + FYERS ROUTES
+# ROUTES
 # ============================================================
 @app.route("/")
 def health():
     return jsonify({"status": "ok"})
 
-@app.route("/ping")
-def ping():
-    return jsonify({"status": "alive"})
-
 @app.route("/fyers-redirect")
 def fyers_redirect():
     log("SYSTEM", "FYERS redirect hit")
-    return jsonify({"status": "redirect_received"})
+    return jsonify({"status": "ok"})
 
 # ============================================================
 # START
