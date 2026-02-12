@@ -1,8 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL main.py
-# MODE: LOCAL SECTOR PUSH + STABLE SECTOR LOGIC
-# LOG: ACTIVE SECTORS ONLY (NO STOCK-LEVEL NOISE)
-# CLEAN EXECUTION – SINGLE ORDER_EXECUTED
+# MODE: LOCAL SECTOR PUSH + CLEAN EXECUTION
+# SINGLE ORDER_EXECUTED GUARANTEED
 # ============================================================
 
 import os
@@ -74,15 +73,8 @@ def clear_logs():
         pass
 
 
-def fmt_ist(ts):
-    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
-
-
-# ============================================================
-# CLEAR LOGS ON DEPLOY
-# ============================================================
 clear_logs()
-log("SYSTEM", "main.py DEPLOYED | CLEAN EXECUTION MODE")
+log("SYSTEM", "main.py DEPLOYED | CLEAN HYBRID MODE")
 
 # ============================================================
 # SETTINGS
@@ -101,72 +93,14 @@ def get_settings():
 SETTINGS = get_settings()
 
 BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
-BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
-SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
 log(
     "SYSTEM",
     f"SETTINGS | BIAS_TIME={BIAS_TIME_STR} | "
-    f"BUY_SECTOR_COUNT={BUY_SECTOR_COUNT} | "
-    f"SELL_SECTOR_COUNT={SELL_SECTOR_COUNT} | "
-    f"PER_TRADE_RISK={PER_TRADE_RISK}"
+    f"PER_TRADE_RISK={PER_TRADE_RISK} | MODE={MODE}"
 )
-
-# ============================================================
-# SECTOR NAME MAP (UNCHANGED)
-# ============================================================
-SECTOR_NAME_TO_KEY = {
-    "NIFTY AUTO": "AUTO",
-    "NIFTY FINANCIAL SERVICES": "FINANCIAL_SERVICES",
-    "NIFTY FIN SERVICE EX BANK": "FIN_SERVICES_EX_BANK",
-    "NIFTY FMCG": "FMCG",
-    "NIFTY IT": "IT",
-    "NIFTY MEDIA": "MEDIA",
-    "NIFTY METAL": "METAL",
-    "NIFTY PHARMA": "PHARMA",
-    "NIFTY PSU BANK": "PSU_BANK",
-    "NIFTY PRIVATE BANK": "PRIVATE_BANK",
-    "NIFTY REALTY": "REALTY",
-    "NIFTY CONSUMER DURABLES": "CONSUMER_DURABLES",
-    "NIFTY OIL & GAS": "OIL_GAS",
-    "NIFTY CHEMICALS": "CHEMICALS",
-    "NIFTY BANK": "BANK",
-    "NIFTY 50": "NIFTY50",
-}
-
-# ============================================================
-# TIME HELPERS
-# ============================================================
-def parse_bias_time_utc(tstr):
-    t = datetime.strptime(tstr, "%H:%M:%S").time()
-    ist_dt = IST.localize(datetime.combine(datetime.now(IST).date(), t))
-    return ist_dt.astimezone(UTC)
-
-
-def candle_start(ts):
-    return ts - (ts % CANDLE_INTERVAL)
-
-
-def floor_5min(ts):
-    return ts - (ts % CANDLE_INTERVAL)
-
-
-# ============================================================
-# HISTORY
-# ============================================================
-def fetch_two_history_candles(symbol, end_ts):
-    res = fyers.history({
-        "symbol": symbol,
-        "resolution": "5",
-        "date_format": "0",
-        "range_from": int(end_ts - 600),
-        "range_to": int(end_ts - 1),
-        "cont_flag": "1"
-    })
-    return res.get("candles", []) if res.get("s") == "ok" else []
-
 
 # ============================================================
 # STATE
@@ -176,17 +110,32 @@ ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 ACTIVE_SYMBOLS = set()
 STOCK_BIAS_MAP = {}
 BIAS_DONE = False
-WAITING_FOR_LOCAL_PUSH = False
 
-candles = {}
-last_base_vol = {}
-last_ws_base_before_bias = {}
+# ============================================================
+# LOCAL PUSH RECEIVER (🔥 FIXED 🔥)
+# ============================================================
+@app.route("/push-sector-bias", methods=["POST"])
+def push_sector_bias():
+    global ACTIVE_SYMBOLS, STOCK_BIAS_MAP, BIAS_DONE
 
-volume_history = {}
-signal_counter = {}
+    data = request.get_json(force=True)
 
-BT_FLOOR_TS = None
-bias_ts = None
+    strong_sectors = data.get("strong_sectors", [])
+    selected_stocks = data.get("selected_stocks", [])
+
+    ACTIVE_SYMBOLS = set(selected_stocks)
+
+    STOCK_BIAS_MAP.clear()
+    for sec in strong_sectors:
+        sector_name = sec.get("sector")
+        bias = sec.get("bias")
+        STOCK_BIAS_MAP[sector_name] = bias
+
+    BIAS_DONE = True
+
+    log("SYSTEM", f"SECTOR PUSH RECEIVED | Active Stocks={len(ACTIVE_SYMBOLS)}")
+
+    return jsonify({"ok": True})
 
 
 # ============================================================
@@ -194,18 +143,16 @@ bias_ts = None
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
+
     if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
 
     ltp = msg.get("ltp")
-    base_vol = msg.get("vol_traded_today")
     ts = msg.get("exch_feed_time")
-    if ltp is None or base_vol is None or ts is None:
+    if ltp is None or ts is None:
         return
 
-    if not BIAS_DONE and bias_ts and ts < bias_ts:
-        last_ws_base_before_bias[symbol] = base_vol
-
+    # ---------------- LTP Handling ----------------
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -214,7 +161,7 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
-    # ✅ SINGLE COMBINED EXECUTION LOG
+    # ---------------- SINGLE EXECUTION LOG ----------------
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -224,7 +171,8 @@ def update_candle(msg):
     ):
         log(
             "ORDER",
-            f"ORDER_EXECUTED | {symbol} | entry={state['entry_price']} | "
+            f"ORDER_EXECUTED | {symbol} | "
+            f"entry={state['entry_price']} | "
             f"SL={round(state['sl_price'],2)} | MODE={MODE}"
         )
         state["entry_sl_logged"] = True
@@ -256,7 +204,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# FLASK ROUTES
+# BASIC ROUTES
 # ============================================================
 @app.route("/")
 def health():
