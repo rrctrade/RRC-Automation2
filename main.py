@@ -1,7 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – FINAL HYBRID PRODUCTION MAIN
+# RajanTradeAutomation – FINAL HYBRID VERBOSE PRODUCTION MAIN
+# BASED ON ORIGINAL STABLE ENGINE
 # LOCAL SECTOR PUSH + FULL CANDLE ENGINE + CLEAN EXECUTION
-# WITH SECTOR FILTER + FYERS REDIRECT PRESERVED
 # ============================================================
 
 import os
@@ -76,7 +76,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "HYBRID FULL CANDLE ENGINE DEPLOYED (FINAL)")
+log("SYSTEM", "HYBRID VERBOSE ENGINE DEPLOYED")
 
 # ============================================================
 # SETTINGS
@@ -105,17 +105,21 @@ MODE = SETTINGS.get("MODE", "PAPER")
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
 ACTIVE_SYMBOLS = set()
-STOCK_BIAS_MAP = {}
 BIAS_DONE = False
+STOCK_BIAS_MAP = {}
 
 candles = {}
 last_base_vol = {}
+last_ws_base_before_bias = {}
+
 volume_history = {}
 signal_counter = {}
+
 BT_FLOOR_TS = None
+bias_ts = None
 
 # ============================================================
-# HELPERS
+# TIME HELPERS
 # ============================================================
 def parse_bias_time_utc(tstr):
     t = datetime.strptime(tstr, "%H:%M:%S").time()
@@ -129,7 +133,7 @@ def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 # ============================================================
-# HISTORY FETCH
+# HISTORY
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     res = fyers.history({
@@ -143,7 +147,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE
+# CLOSE LIVE CANDLE (UNCHANGED VERBOSE VERSION)
 # ============================================================
 def close_live_candle(symbol, c):
     prev_base = last_base_vol.get(symbol)
@@ -158,9 +162,12 @@ def close_live_candle(symbol, c):
     volume_history.setdefault(symbol, []).append(candle_vol)
 
     color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
-    bias = STOCK_BIAS_MAP.get(symbol)
+    bias = STOCK_BIAS_MAP.get(symbol, "")
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
 
-    # OPEN TRADE PL
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
+
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
@@ -170,8 +177,7 @@ def close_live_candle(symbol, c):
         pl = (close_price - entry) * qty if side == "BUY" else (entry - close_price) * qty
         log("ORDER", f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}")
 
-    # SIGNAL
-    if is_lowest and bias:
+    if is_lowest:
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
             signal_counter[symbol] = sc
@@ -190,7 +196,7 @@ def close_live_candle(symbol, c):
             )
 
 # ============================================================
-# UPDATE TICK
+# UPDATE TICK (UNCHANGED)
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -203,6 +209,9 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
+    if not BIAS_DONE and bias_ts and ts < bias_ts:
+        last_ws_base_before_bias[symbol] = base_vol
+
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -211,7 +220,6 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
-    # SINGLE EXECUTION LOG
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -248,18 +256,21 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# SECTOR PUSH ROUTE
+# HYBRID SECTOR PUSH ROUTE (FULL CONTROLLER SHIFTED HERE)
 # ============================================================
 @app.route("/push-sector-bias", methods=["POST"])
 def push_sector_bias():
-    global ACTIVE_SYMBOLS, STOCK_BIAS_MAP, BIAS_DONE, BT_FLOOR_TS
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
 
     data = request.get_json(force=True)
     strong = data.get("strong_sectors", [])
     all_selected = data.get("selected_stocks", [])
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
-    BT_FLOOR_TS = floor_5min(int(bias_dt.timestamp()))
+    bias_ts = int(bias_dt.timestamp())
+    BT_FLOOR_TS = floor_5min(bias_ts)
+
+    log("BIAS", "Bias calculation received from LOCAL")
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
@@ -299,9 +310,13 @@ def push_sector_bias():
         for ts, o, h, l, c, v in history[:2]:
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
-        last_base_vol[s] = history[-1][5] if history else 0
 
-    log("SYSTEM", "History loaded – LIVE started")
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+
+    log("SYSTEM", "History loaded – system LIVE")
+
     return jsonify({"ok": True})
 
 # ============================================================
