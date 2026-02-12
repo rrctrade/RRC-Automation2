@@ -1,7 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL HYBRID VERBOSE PRODUCTION MAIN
-# BASED ON ORIGINAL STABLE ENGINE
-# LOCAL SECTOR PUSH + FULL CANDLE ENGINE + CLEAN EXECUTION
+# RajanTradeAutomation – FINAL main.py
+# BASED ON STABLE VERSION + ENTRY+SL COMBINED (SAFE)
 # ============================================================
 
 import os
@@ -10,13 +9,13 @@ import threading
 import requests
 from datetime import datetime
 import pytz
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
-from sector_engine import SECTOR_LIST
+from sector_engine import run_sector_bias, SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
@@ -75,11 +74,14 @@ def clear_logs():
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
+# ============================================================
+# CLEAR LOGS ON DEPLOY
+# ============================================================
 clear_logs()
-log("SYSTEM", "HYBRID VERBOSE ENGINE DEPLOYED")
+log("SYSTEM", "main.py FINAL DEPLOY START (STABLE + ENTRY_SL_COMBINED)")
 
 # ============================================================
-# SETTINGS
+# SETTINGS (NO DEFAULTS, SAFE RETRY)
 # ============================================================
 def get_settings():
     for _ in range(3):
@@ -89,34 +91,15 @@ def get_settings():
                 return r.json().get("settings", {})
         except Exception:
             time.sleep(1)
-    raise RuntimeError("Unable to fetch Settings")
+    raise RuntimeError("Unable to fetch Settings from WebApp")
 
 SETTINGS = get_settings()
 
-BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")
+BIAS_TIME_STR = SETTINGS.get("BIAS_TIME")          # MUST come from sheet
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
-
-# ============================================================
-# STATE
-# ============================================================
-ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
-
-ACTIVE_SYMBOLS = set()
-BIAS_DONE = False
-STOCK_BIAS_MAP = {}
-
-candles = {}
-last_base_vol = {}
-last_ws_base_before_bias = {}
-
-volume_history = {}
-signal_counter = {}
-
-BT_FLOOR_TS = None
-bias_ts = None
 
 # ============================================================
 # TIME HELPERS
@@ -147,7 +130,27 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE (UNCHANGED VERBOSE VERSION)
+# STATE
+# ============================================================
+ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
+
+ACTIVE_SYMBOLS = set()
+BIAS_DONE = False
+
+candles = {}
+last_base_vol = {}
+last_ws_base_before_bias = {}
+
+volume_history = {}
+lowest_counter = {}
+signal_counter = {}
+
+BT_FLOOR_TS = None
+bias_ts = None
+STOCK_BIAS_MAP = {}
+
+# ============================================================
+# CLOSE LIVE CANDLE
 # ============================================================
 def close_live_candle(symbol, c):
     prev_base = last_base_vol.get(symbol)
@@ -168,15 +171,18 @@ def close_live_candle(symbol, c):
 
     log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
 
+    # -------- OPEN TRADE PL --------
     state = ORDER_STATE.get(symbol)
     if state and state.get("status") == "SL_PLACED" and state.get("entry_price"):
         entry = state["entry_price"]
         qty = state["qty"]
         side = state["side"]
         close_price = c["close"]
+
         pl = (close_price - entry) * qty if side == "BUY" else (entry - close_price) * qty
         log("ORDER", f"OPEN_TRADE_PL | {symbol} | PL={round(pl,2)}")
 
+    # -------- SIGNAL GENERATION --------
     if is_lowest:
         if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
             sc = signal_counter.get(symbol, 0) + 1
@@ -196,7 +202,7 @@ def close_live_candle(symbol, c):
             )
 
 # ============================================================
-# UPDATE TICK (UNCHANGED)
+# UPDATE CANDLE (TICK LEVEL)
 # ============================================================
 def update_candle(msg):
     symbol = msg.get("symbol")
@@ -220,6 +226,7 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
+    # -------- ENTRY + SL COMBINED LOG (ONCE) --------
     state = ORDER_STATE.get(symbol)
     if (
         state
@@ -256,40 +263,57 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# HYBRID SECTOR PUSH ROUTE (FULL CONTROLLER SHIFTED HERE)
+# WEBSOCKET
 # ============================================================
-@app.route("/push-sector-bias", methods=["POST"])
-def push_sector_bias():
-    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
+def on_message(msg):
+    update_candle(msg)
 
-    data = request.get_json(force=True)
-    strong = data.get("strong_sectors", [])
-    all_selected = data.get("selected_stocks", [])
+def on_connect():
+    log("SYSTEM", "WS CONNECTED")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+# ============================================================
+# CONTROLLER
+# ============================================================
+def controller():
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE, bias_ts
 
     bias_dt = parse_bias_time_utc(BIAS_TIME_STR)
     bias_ts = int(bias_dt.timestamp())
-    BT_FLOOR_TS = floor_5min(bias_ts)
 
-    log("BIAS", "Bias calculation received from LOCAL")
+    log("SYSTEM", f"Waiting for BIAS_TIME={BIAS_TIME_STR}")
+
+    while datetime.now(UTC).timestamp() < bias_ts:
+        time.sleep(1)
+
+    BT_FLOOR_TS = floor_5min(bias_ts)
+    log("BIAS", "Bias calculation started")
+
+    res = run_sector_bias()
+    strong = res.get("strong_sectors", [])
+    all_selected = res.get("selected_stocks", [])
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    buy_sectors = [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]
-    sell_sectors = [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
-
-    for s in buy_sectors:
-        log("BIAS", f"ACTIVE_SECTOR BUY  → {s['sector']}")
-
-    for s in sell_sectors:
-        log("BIAS", f"ACTIVE_SECTOR SELL → {s['sector']}")
-
-    for s in buy_sectors:
+    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
 
-    for s in sell_sectors:
+    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
@@ -317,32 +341,10 @@ def push_sector_bias():
 
     log("SYSTEM", "History loaded – system LIVE")
 
-    return jsonify({"ok": True})
+threading.Thread(target=controller, daemon=True).start()
 
 # ============================================================
-# WEBSOCKET
-# ============================================================
-def on_message(msg):
-    update_candle(msg)
-
-def on_connect():
-    log("SYSTEM", "WS CONNECTED")
-    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-
-def start_ws():
-    global fyers_ws
-    fyers_ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_message,
-        on_connect=on_connect,
-        reconnect=True
-    )
-    fyers_ws.connect()
-
-threading.Thread(target=start_ws, daemon=True).start()
-
-# ============================================================
-# ROUTES
+# FLASK ROUTES
 # ============================================================
 @app.route("/")
 def health():
