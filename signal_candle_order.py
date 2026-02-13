@@ -1,7 +1,8 @@
 # ============================================================
 # signal_candle_order.py
 # RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
-# CLEAN EXECUTION VERSION (NO DUPLICATE LOGS)
+# FINAL VERSION – CANCEL-ONLY SUPPORT ADDED
+# Compatible with new main.py (side=None cancel flow)
 # ============================================================
 
 from math import floor
@@ -50,7 +51,6 @@ def place_signal_order(
     txn = 1 if side == "BUY" else -1
     init_sl = low if side == "BUY" else high
 
-    # ✅ ORDER_SIGNAL now includes SL
     log_fn(
         f"ORDER_SIGNAL | {symbol} | {side} | "
         f"trigger={trigger} SL={round(init_sl,2)} qty={qty} | SIGNAL#{signal_no}"
@@ -82,24 +82,49 @@ def place_signal_order(
         "sl_order_id": None,
         "signal_order_id": signal_order_id,
         "trail_done": False,
-        "entry_sl_logged": False,
+        "entry_logged": False,
     }
 
 
 # ------------------------------------------------------------
-# HANDLE SIGNAL
+# HANDLE SIGNAL EVENT
 # ------------------------------------------------------------
 def handle_signal_event(**kwargs):
     symbol = kwargs["symbol"]
     fyers = kwargs["fyers"]
     mode = kwargs["mode"]
     log_fn = kwargs["log_fn"]
+    side = kwargs.get("side")
 
     state = ORDER_STATE.get(symbol)
 
+    # --------------------------------------------------------
+    # 🔥 CANCEL-ONLY MODE (side=None)
+    # --------------------------------------------------------
+    if side is None:
+        if state and state.get("status") == "PENDING":
+            if mode == "LIVE" and state.get("signal_order_id"):
+                try:
+                    fyers.cancel_order({"id": state["signal_order_id"]})
+                    log_fn(f"ORDER_CANCEL | {symbol} | SIGNAL")
+                except Exception as e:
+                    log_fn(f"SIGNAL_CANCEL_FAIL | {symbol} | {e}")
+                    return
+            else:
+                log_fn(f"PAPER_ORDER_CANCEL | {symbol} | SIGNAL")
+
+            ORDER_STATE.pop(symbol, None)
+        return
+
+    # --------------------------------------------------------
+    # Ignore if already executed
+    # --------------------------------------------------------
     if state and state.get("status") in ("SL_PLACED", "SL_HIT"):
         return
 
+    # --------------------------------------------------------
+    # Cancel old pending before new signal
+    # --------------------------------------------------------
     if state and state.get("status") == "PENDING":
         if mode == "LIVE" and state.get("signal_order_id"):
             try:
@@ -113,11 +138,14 @@ def handle_signal_event(**kwargs):
 
         ORDER_STATE.pop(symbol, None)
 
+    # --------------------------------------------------------
+    # Place fresh signal
+    # --------------------------------------------------------
     place_signal_order(**kwargs)
 
 
 # ------------------------------------------------------------
-# SL PLACE (NO LOG HERE)
+# PLACE SL
 # ------------------------------------------------------------
 def place_sl(fyers, state, symbol, sl_price, mode):
     side = state["side"]
@@ -184,7 +212,6 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
                 else state["signal_high"]
             )
 
-            # ✅ Only state update, NO log here
             place_sl(fyers, state, symbol, init_sl, mode)
 
         return
@@ -226,4 +253,5 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
 __all__ = [
     "handle_signal_event",
     "handle_ltp_event",
+    "ORDER_STATE",
 ]
