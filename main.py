@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – ORIGINAL STABLE + LOCAL BIAS PUSH
 # ONLY CHANGE: Bias आता Local push वरून येईल
+# FIX ADDED: ORDER_EXECUTED log restored
 # बाकी सर्व logic जसाच्या तसा
 # ============================================================
 
@@ -16,7 +17,7 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
-from sector_engine import SECTOR_LIST   # run_sector_bias REMOVED
+from sector_engine import SECTOR_LIST
 from signal_candle_order import (
     handle_signal_event,
     handle_ltp_event,
@@ -99,7 +100,7 @@ PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
 # ============================================================
-# STATE (UNCHANGED)
+# STATE
 # ============================================================
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -118,7 +119,7 @@ bias_ts = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY (UNCHANGED)
+# HISTORY
 # ============================================================
 def fetch_two_history_candles(symbol, end_ts):
     res = fyers.history({
@@ -173,11 +174,9 @@ def close_live_candle(symbol, c):
             )
 
 # ============================================================
-# UPDATE CANDLE (UNCHANGED)
+# UPDATE CANDLE
 # ============================================================
 def update_candle(msg):
-    global bias_ts
-
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
     base_vol = msg.get("vol_traded_today")
@@ -193,6 +192,7 @@ def update_candle(msg):
     if symbol not in ACTIVE_SYMBOLS:
         return
 
+    # ---------- ENTRY + SL EXECUTION HANDLER ----------
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -201,6 +201,22 @@ def update_candle(msg):
         log_fn=lambda m: log("ORDER", m)
     )
 
+    # ---------- ORDER_EXECUTED LOG (ONCE) ----------
+    state = ORDER_STATE.get(symbol)
+    if (
+        state
+        and state.get("status") == "SL_PLACED"
+        and state.get("entry_price")
+        and not state.get("entry_logged")
+    ):
+        log(
+            "ORDER",
+            f"ORDER_EXECUTED | {symbol} | entry={state['entry_price']} | "
+            f"SL={round(state['sl_price'],2)} | MODE={MODE}"
+        )
+        state["entry_logged"] = True
+
+    # ---------- CANDLE BUILD ----------
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
 
@@ -223,7 +239,7 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# WEBSOCKET (UNCHANGED)
+# WEBSOCKET
 # ============================================================
 def on_message(msg):
     update_candle(msg)
@@ -245,7 +261,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# LOCAL BIAS RECEIVE (ONLY CHANGE)
+# LOCAL BIAS RECEIVE (UNCHANGED)
 # ============================================================
 @app.route("/push-sector-bias", methods=["POST"])
 def receive_bias():
@@ -257,7 +273,6 @@ def receive_bias():
     strong = data.get("strong_sectors", [])
     selected = data.get("selected_stocks", [])
 
-    # Bias time NOW (aligned to 5min)
     bias_ts = int(datetime.now(UTC).timestamp())
     BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
 
@@ -266,7 +281,6 @@ def receive_bias():
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    # ORIGINAL sector filtering logic
     for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
         for sym in SECTOR_MAP.get(key, []):
@@ -287,7 +301,6 @@ def receive_bias():
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
-    # ORIGINAL history logic
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
         history = fetch_two_history_candles(s, BT_FLOOR_TS)
