@@ -1,5 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS + STABLE FLOW)
+# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
+# FULL FLOW HEADER + FULL LOGGING + PENDING FIX
 # ============================================================
 
 """
@@ -14,16 +15,17 @@ PHASE 1 – DEPLOY
 4) WebSocket connect (ALL symbols)
 
 PHASE 2 – LOCAL BIAS WAIT
-5) Wait for Local bias push
-6) Receive strong sectors + selected stocks
-7) Create STOCK_BIAS_MAP
-8) Filter ACTIVE_SYMBOLS
-9) Unsubscribe non-active symbols
+5) Local system waits till BIAS_TIME
+6) Local pushes strong_sectors + selected_stocks
+7) Render receives bias
+8) Create STOCK_BIAS_MAP
+9) Filter ACTIVE_SYMBOLS
+10) Unsubscribe non-active symbols
 
 PHASE 3 – HISTORY LOAD
-10) Load 2 history candles
-11) Set LIVE3 base volume
-12) System LIVE
+11) Load 2 history candles
+12) Set LIVE3 base volume
+13) System LIVE
 
 PHASE 4 – SIGNAL LOGIC
 
@@ -40,7 +42,7 @@ SELL Bias:
 PHASE 5 – ORDER LIFECYCLE
 - LTP >= trigger → ENTRY
 - SL placed
-- RR logic handled inside signal engine
+- RR 1.5 → SL modified (₹200 lock)
 - SL hit → exit
 
 ============================================================
@@ -169,7 +171,7 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY
+# HISTORY FETCH
 # ============================================================
 
 def fetch_two_history_candles(symbol, end_ts):
@@ -184,7 +186,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE CANDLE (WITH OLD PENDING CANCEL RESTORED)
+# CLOSE LIVE CANDLE
 # ============================================================
 
 def close_live_candle(symbol, c):
@@ -203,10 +205,14 @@ def close_live_candle(symbol, c):
     color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
+
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
+
     if not is_lowest:
         return
 
-    # -------- OLD PENDING CANCEL --------
     state = ORDER_STATE.get(symbol)
     status = state.get("status") if state else None
 
@@ -223,12 +229,10 @@ def close_live_candle(symbol, c):
             log_fn=lambda m: log("ORDER", m)
         )
 
-    # -------- SIGNAL GENERATION --------
     if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
 
         sc = signal_counter.get(symbol, 0) + 1
         signal_counter[symbol] = sc
-
         side = "BUY" if bias == "B" else "SELL"
 
         handle_signal_event(
@@ -271,20 +275,6 @@ def update_candle(msg):
         mode=MODE,
         log_fn=lambda m: log("ORDER", m)
     )
-
-    state = ORDER_STATE.get(symbol)
-    if (
-        state
-        and state.get("status") == "SL_PLACED"
-        and state.get("entry_price")
-        and not state.get("entry_logged")
-    ):
-        log(
-            "ORDER",
-            f"ORDER_EXECUTED | {symbol} | entry={state['entry_price']} | "
-            f"SL={round(state['sl_price'],2)} | MODE={MODE}"
-        )
-        state["entry_logged"] = True
 
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
@@ -331,7 +321,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# LOCAL BIAS ROUTE
+# LOCAL BIAS RECEIVE
 # ============================================================
 
 @app.route("/push-sector-bias", methods=["POST"])
@@ -340,12 +330,13 @@ def receive_bias():
     global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
 
     data = request.get_json(force=True)
-
     strong = data.get("strong_sectors", [])
     selected = data.get("selected_stocks", [])
 
     bias_ts = int(datetime.now(UTC).timestamp())
     BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
+
+    log("BIAS", "Bias received from LOCAL")
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
@@ -368,14 +359,19 @@ def receive_bias():
         data_type="SymbolUpdate"
     )
 
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
         history = fetch_two_history_candles(s, BT_FLOOR_TS)
+
         for ts, o, h, l, c, v in history[:2]:
             volume_history[s].append(v)
+            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
         if s in last_ws_base_before_bias:
             last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
