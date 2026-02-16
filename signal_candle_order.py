@@ -1,8 +1,8 @@
 # ============================================================
 # signal_candle_order.py
 # RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
-# FINAL VERSION – CANCEL-ONLY SUPPORT ADDED
-# Compatible with new main.py (side=None cancel flow)
+# FINAL VERSION – WITH ORDER_EXECUTED LOG FIX
+# Compatible with main.py (LOCAL BIAS MODE)
 # ============================================================
 
 from math import floor
@@ -14,6 +14,7 @@ ORDER_STATE = {}
 
 RR_PROFIT = 750
 LOCK_PROFIT = 200
+
 
 # ------------------------------------------------------------
 # HELPERS
@@ -42,6 +43,7 @@ def place_signal_order(
     *, fyers, symbol, side, high, low,
     per_trade_risk, mode, signal_no, log_fn
 ):
+
     qty = calc_qty(high, low, per_trade_risk)
     if qty <= 0:
         log_fn(f"ORDER_SKIP | {symbol} | qty=0")
@@ -57,6 +59,7 @@ def place_signal_order(
     )
 
     signal_order_id = None
+
     if mode == "LIVE":
         resp = fyers.place_order({
             "symbol": symbol,
@@ -90,6 +93,7 @@ def place_signal_order(
 # HANDLE SIGNAL EVENT
 # ------------------------------------------------------------
 def handle_signal_event(**kwargs):
+
     symbol = kwargs["symbol"]
     fyers = kwargs["fyers"]
     mode = kwargs["mode"]
@@ -99,7 +103,7 @@ def handle_signal_event(**kwargs):
     state = ORDER_STATE.get(symbol)
 
     # --------------------------------------------------------
-    # 🔥 CANCEL-ONLY MODE (side=None)
+    # CANCEL-ONLY MODE
     # --------------------------------------------------------
     if side is None:
         if state and state.get("status") == "PENDING":
@@ -117,9 +121,9 @@ def handle_signal_event(**kwargs):
         return
 
     # --------------------------------------------------------
-    # Ignore if already executed
+    # Ignore if trade already active or closed
     # --------------------------------------------------------
-    if state and state.get("status") in ("SL_PLACED", "SL_HIT"):
+    if state and state.get("status") in ("EXECUTED", "SL_PLACED", "SL_HIT"):
         return
 
     # --------------------------------------------------------
@@ -148,6 +152,7 @@ def handle_signal_event(**kwargs):
 # PLACE SL
 # ------------------------------------------------------------
 def place_sl(fyers, state, symbol, sl_price, mode):
+
     side = state["side"]
     qty = state["qty"]
     sl_side = -1 if side == "BUY" else 1
@@ -185,6 +190,7 @@ def cancel_sl(fyers, state, symbol, mode, log_fn):
 # HANDLE LTP EVENT
 # ------------------------------------------------------------
 def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
+
     state = ORDER_STATE.get(symbol)
     if not state:
         return
@@ -194,10 +200,12 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
 
     # ---------------- ENTRY EXEC ----------------
     if state["status"] == "PENDING":
+
         if (side == "BUY" and ltp >= state["trigger"]) or \
            (side == "SELL" and ltp <= state["trigger"]):
 
             entry = ltp
+
             if mode != "LIVE":
                 buf = state["trigger"] * 0.001
                 entry = round_price(
@@ -206,6 +214,12 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
                 )
 
             state["entry_price"] = entry
+            state["status"] = "EXECUTED"
+
+            log_fn(
+                f"ORDER_EXECUTED | {symbol} | "
+                f"ENTRY={round(entry,2)} | QTY={qty} | MODE={mode}"
+            )
 
             init_sl = (
                 state["signal_low"] if side == "BUY"
@@ -225,6 +239,7 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
 
     # ---------------- RR TRAILING ----------------
     if profit >= RR_PROFIT and not state["trail_done"]:
+
         new_sl = (
             entry + (LOCK_PROFIT / qty)
             if side == "BUY"
@@ -245,6 +260,7 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
            (side == "SELL" and ltp >= state["sl_price"]):
 
             state["status"] = "SL_HIT"
+
             log_fn(
                 f"SL_EXECUTED | {symbol} | SL={round(state['sl_price'],2)}"
             )
