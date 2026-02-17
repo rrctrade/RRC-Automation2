@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW HEADER + FULL LOGGING + VOLCHK ONLY (LIVE3+)
+# FULL FLOW HEADER + FULL LOGGING (LIVE4 VOLCHK MODE)
 # ============================================================
 
 """
@@ -23,12 +23,12 @@ PHASE 2 – LOCAL BIAS WAIT
 10) Unsubscribe non-active symbols
 
 PHASE 3 – HISTORY LOAD
-11) Load 2 history candles
-12) Set LIVE3 base volume
+11) Load 3 history candles
+12) Set LIVE4 base volume
 13) System LIVE
 
 PHASE 4 – SIGNAL LOGIC
-(Currently Disabled – VOLCHK ONLY)
+(Currently Disabled – VOLCHK FROM LIVE4)
 
 PHASE 5 – ORDER LIFECYCLE
 (Currently Disabled)
@@ -111,7 +111,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (VOLCHK ONLY)")
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (LIVE4 VOLCHK)")
 
 # ============================================================
 # SETTINGS
@@ -151,22 +151,22 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY FETCH
+# HISTORY FETCH (3 CANDLES)
 # ============================================================
 
-def fetch_two_history_candles(symbol, end_ts):
+def fetch_three_history_candles(symbol, end_ts):
     res = fyers.history({
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": int(end_ts - 600),
+        "range_from": int(end_ts - 900),  # 15 minutes
         "range_to": int(end_ts - 1),
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE (VOLCHK ONLY)
+# CLOSE LIVE CANDLE (VOLCHK FROM LIVE4)
 # ============================================================
 
 def close_live_candle(symbol, c):
@@ -189,7 +189,7 @@ def close_live_candle(symbol, c):
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
-    label = f"LIVE{offset + 3}"
+    label = f"LIVE{offset + 4}"
 
     log(
         "VOLCHK",
@@ -280,17 +280,25 @@ def receive_bias():
 
     log("BIAS", "Bias received from LOCAL")
 
+    filtered = (
+        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
+        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
+    )
+
+    for s in filtered:
+        log(
+            "BIAS",
+            f"{s['bias']} - {s['sector']} - "
+            f"ADVANCES {s['up_pct']}% DECLINES {s['down_pct']}%"
+        )
+
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in strong:
+    for s in filtered:
         key = SECTOR_LIST.get(s["sector"])
-        if s["bias"] == "BUY":
-            for sym in SECTOR_MAP.get(key, []):
-                STOCK_BIAS_MAP[sym] = "B"
-        elif s["bias"] == "SELL":
-            for sym in SECTOR_MAP.get(key, []):
-                STOCK_BIAS_MAP[sym] = "S"
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "B" if s["bias"] == "BUY" else "S"
 
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
@@ -304,15 +312,15 @@ def receive_bias():
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
-        history = fetch_two_history_candles(s, BT_FLOOR_TS)
+        history = fetch_three_history_candles(s, BT_FLOOR_TS)
 
-        for ts, o, h, l, c, v in history[:2]:
+        for ts, o, h, l, c, v in history[:3]:
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
         if s in last_ws_base_before_bias:
             last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+            log("SYSTEM", f"{s} | LIVE4 BASE SET | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
