@@ -1,43 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW HEADER + FULL LOGGING (HISTORY 3 + TRUE LIVE4 BASE)
-# ============================================================
-
-"""
-============================================================
-FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
-============================================================
-
-PHASE 1 – DEPLOY
-1) ENV load
-2) Logs cleared
-3) Settings fetch
-4) WebSocket connect (ALL symbols)
-
-PHASE 2 – LOCAL BIAS WAIT
-5) Local system waits till BIAS_TIME
-6) Local pushes strong_sectors + selected_stocks
-7) Render receives bias
-8) Create STOCK_BIAS_MAP
-9) Filter ACTIVE_SYMBOLS
-10) Unsubscribe non-active symbols
-
-PHASE 3 – HISTORY LOAD
-11) Load 3 history candles
-12) LIVE4 first tick becomes BASE
-13) System LIVE
-
-PHASE 4 – SIGNAL LOGIC
-(Currently Disabled – VOLCHK FROM LIVE4)
-
-PHASE 5 – ORDER LIFECYCLE
-(Currently Disabled)
-
-============================================================
-"""
-
-# ============================================================
-# IMPORTS
+# RajanTradeAutomation – CANDLE ENGINE ONLY (TEST MODE)
+# LOCAL BIAS MODE + 3 HISTORY CANDLES
 # ============================================================
 
 import os
@@ -111,7 +74,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (HISTORY 3 LIVE4 BASE)")
+log("SYSTEM", "CANDLE ENGINE START – LOCAL BIAS MODE")
 
 # ============================================================
 # SETTINGS
@@ -131,6 +94,10 @@ SETTINGS = get_settings()
 
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
+BIAS_TIME = SETTINGS.get("BIAS_TIME")
+
+log("SYSTEM", f"BIAS_TIME (Sheet) = {BIAS_TIME}")
+log("SYSTEM", "Waiting for local bias push...")
 
 # ============================================================
 # STATE
@@ -146,7 +113,6 @@ last_base_vol = {}
 last_ws_base_before_bias = {}
 
 volume_history = {}
-
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
@@ -166,35 +132,27 @@ def fetch_three_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE (VOLCHK FROM LIVE4)
+# CLOSE LIVE CANDLE
 # ============================================================
 
 def close_live_candle(symbol, c):
 
-    if symbol not in last_base_vol:
-        return  # LIVE4 base not set yet
+    prev_base = last_base_vol.get(symbol)
+    if prev_base is None:
+        return
 
-    candle_vol = c["base_vol"] - last_base_vol[symbol]
+    candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
-
-    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = prev_min is not None and candle_vol < prev_min
 
     volume_history.setdefault(symbol, []).append(candle_vol)
 
-    color = "RED" if c["open"] > c["close"] else \
-            "GREEN" if c["open"] < c["close"] else "DOJI"
-
+    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 4}"
 
-    log(
-        "VOLCHK",
-        f"{symbol} | {label} | vol={round(candle_vol,2)} | "
-        f"is_lowest={is_lowest} | {color} {bias}"
-    )
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | {color} {bias}")
 
 # ============================================================
 # UPDATE CANDLE
@@ -221,10 +179,8 @@ def update_candle(msg):
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
-
         if c:
             close_live_candle(symbol, c)
-
         candles[symbol] = {
             "start": start,
             "open": ltp,
@@ -233,12 +189,6 @@ def update_candle(msg):
             "close": ltp,
             "base_vol": base_vol
         }
-
-        # 🎯 FIRST TICK OF LIVE4 BECOMES BASE
-        if symbol not in last_base_vol:
-            last_base_vol[symbol] = base_vol
-            log("SYSTEM", f"{symbol} | LIVE4 BASE CAPTURED | base={base_vol}")
-
         return
 
     c["high"] = max(c["high"], ltp)
@@ -256,6 +206,7 @@ def on_message(msg):
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+    log("SYSTEM", f"Subscribed ALL_SYMBOLS={len(ALL_SYMBOLS)}")
 
 def start_ws():
     global fyers_ws
@@ -285,7 +236,7 @@ def receive_bias():
     bias_ts = int(datetime.now(UTC).timestamp())
     BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
 
-    log("BIAS", "Bias received from LOCAL")
+    log("BIAS", f"Bias received from LOCAL at {fmt_ist(bias_ts)}")
 
     filtered = (
         [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
@@ -296,18 +247,11 @@ def receive_bias():
         log(
             "BIAS",
             f"{s['bias']} - {s['sector']} - "
-            f"ADVANCES {s['up_pct']}% DECLINES {s['down_pct']}%"
+            f"Advance {s['up_pct']}% Decline {s['down_pct']}%"
         )
 
     STOCK_BIAS_MAP.clear()
-    ACTIVE_SYMBOLS.clear()
-
-    for s in filtered:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "B" if s["bias"] == "BUY" else "S"
-
-    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
+    ACTIVE_SYMBOLS = set(selected)
     BIAS_DONE = True
 
     fyers_ws.unsubscribe(
@@ -325,7 +269,11 @@ def receive_bias():
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-    log("SYSTEM", "History loaded – waiting for LIVE4")
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE BASE SET | base={last_base_vol[s]}")
+
+    log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
 
@@ -335,11 +283,6 @@ def receive_bias():
 
 @app.route("/")
 def health():
-    return jsonify({"status": "ok"})
-
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
 
 # ============================================================
