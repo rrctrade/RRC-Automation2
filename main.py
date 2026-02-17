@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW HEADER + FULL LOGGING + PENDING FIX
+# FULL FLOW HEADER + FULL LOGGING + VOLCHK ONLY (LIVE3+)
 # ============================================================
 
 """
@@ -28,22 +28,10 @@ PHASE 3 – HISTORY LOAD
 13) System LIVE
 
 PHASE 4 – SIGNAL LOGIC
-
-BUY Bias:
-- Lowest + RED → BUY breakout
-- If previous signal PENDING → cancel first
-- Executed trade → ignore new signals
-
-SELL Bias:
-- Lowest + GREEN → SELL breakout
-- If previous signal PENDING → cancel first
-- Executed trade → ignore new signals
+(Currently Disabled – VOLCHK ONLY)
 
 PHASE 5 – ORDER LIFECYCLE
-- LTP >= trigger → ENTRY
-- SL placed
-- RR 1.5 → SL modified (₹200 lock)
-- SL hit → exit
+(Currently Disabled)
 
 ============================================================
 """
@@ -65,11 +53,6 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import SECTOR_LIST
-from signal_candle_order import (
-    handle_signal_event,
-    handle_ltp_event,
-    ORDER_STATE
-)
 
 # ============================================================
 # TIME
@@ -128,7 +111,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE")
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (VOLCHK ONLY)")
 
 # ============================================================
 # SETTINGS
@@ -148,8 +131,6 @@ SETTINGS = get_settings()
 
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
-PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
-MODE = SETTINGS.get("MODE", "PAPER")
 
 # ============================================================
 # STATE
@@ -165,7 +146,6 @@ last_base_vol = {}
 last_ws_base_before_bias = {}
 
 volume_history = {}
-signal_counter = {}
 
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
@@ -186,7 +166,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE
+# CLOSE LIVE CANDLE (VOLCHK ONLY)
 # ============================================================
 
 def close_live_candle(symbol, c):
@@ -200,52 +180,22 @@ def close_live_candle(symbol, c):
 
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
     is_lowest = prev_min is not None and candle_vol < prev_min
+
     volume_history.setdefault(symbol, []).append(candle_vol)
 
-    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
+    color = "RED" if c["open"] > c["close"] else \
+            "GREEN" if c["open"] < c["close"] else "DOJI"
+
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 3}"
 
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
-
-    if not is_lowest:
-        return
-
-    state = ORDER_STATE.get(symbol)
-    status = state.get("status") if state else None
-
-    if status == "PENDING":
-        handle_signal_event(
-            fyers=fyers,
-            symbol=symbol,
-            side=None,
-            high=None,
-            low=None,
-            per_trade_risk=PER_TRADE_RISK,
-            mode=MODE,
-            signal_no=None,
-            log_fn=lambda m: log("ORDER", m)
-        )
-
-    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
-
-        sc = signal_counter.get(symbol, 0) + 1
-        signal_counter[symbol] = sc
-        side = "BUY" if bias == "B" else "SELL"
-
-        handle_signal_event(
-            fyers=fyers,
-            symbol=symbol,
-            side=side,
-            high=c["high"],
-            low=c["low"],
-            per_trade_risk=PER_TRADE_RISK,
-            mode=MODE,
-            signal_no=sc,
-            log_fn=lambda m: log("ORDER", m)
-        )
+    log(
+        "VOLCHK",
+        f"{symbol} | {label} | vol={round(candle_vol,2)} | "
+        f"is_lowest={is_lowest} | {color} {bias}"
+    )
 
 # ============================================================
 # UPDATE CANDLE
@@ -267,14 +217,6 @@ def update_candle(msg):
 
     if symbol not in ACTIVE_SYMBOLS:
         return
-
-    handle_ltp_event(
-        fyers=fyers,
-        symbol=symbol,
-        ltp=ltp,
-        mode=MODE,
-        log_fn=lambda m: log("ORDER", m)
-    )
 
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
@@ -338,31 +280,17 @@ def receive_bias():
 
     log("BIAS", "Bias received from LOCAL")
 
-    # ✅ Sector Summary Logging
-    filtered = (
-        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
-        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
-    )
-
-    for s in filtered:
-        log(
-            "BIAS",
-            f"{s['bias']} - {s['sector']} - "
-            f"ADVANCES {s['up_pct']}% DECLINES {s['down_pct']}%"
-        )
-
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+    for s in strong:
         key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "B"
-
-    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "S"
+        if s["bias"] == "BUY":
+            for sym in SECTOR_MAP.get(key, []):
+                STOCK_BIAS_MAP[sym] = "B"
+        elif s["bias"] == "SELL":
+            for sym in SECTOR_MAP.get(key, []):
+                STOCK_BIAS_MAP[sym] = "S"
 
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
