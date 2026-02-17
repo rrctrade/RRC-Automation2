@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW HEADER + FULL LOGGING (LIVE4 VOLCHK MODE)
+# FULL FLOW HEADER + FULL LOGGING (HISTORY 3 + TRUE LIVE4 BASE)
 # ============================================================
 
 """
@@ -24,7 +24,7 @@ PHASE 2 – LOCAL BIAS WAIT
 
 PHASE 3 – HISTORY LOAD
 11) Load 3 history candles
-12) Set LIVE4 base volume
+12) LIVE4 first tick becomes BASE
 13) System LIVE
 
 PHASE 4 – SIGNAL LOGIC
@@ -111,7 +111,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (LIVE4 VOLCHK)")
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (HISTORY 3 LIVE4 BASE)")
 
 # ============================================================
 # SETTINGS
@@ -159,7 +159,7 @@ def fetch_three_history_candles(symbol, end_ts):
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": int(end_ts - 900),  # 15 minutes
+        "range_from": int(end_ts - 900),
         "range_to": int(end_ts - 1),
         "cont_flag": "1"
     })
@@ -171,11 +171,10 @@ def fetch_three_history_candles(symbol, end_ts):
 
 def close_live_candle(symbol, c):
 
-    prev_base = last_base_vol.get(symbol)
-    if prev_base is None:
-        return
+    if symbol not in last_base_vol:
+        return  # LIVE4 base not set yet
 
-    candle_vol = c["base_vol"] - prev_base
+    candle_vol = c["base_vol"] - last_base_vol[symbol]
     last_base_vol[symbol] = c["base_vol"]
 
     prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
@@ -222,8 +221,10 @@ def update_candle(msg):
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
+
         if c:
             close_live_candle(symbol, c)
+
         candles[symbol] = {
             "start": start,
             "open": ltp,
@@ -232,6 +233,12 @@ def update_candle(msg):
             "close": ltp,
             "base_vol": base_vol
         }
+
+        # 🎯 FIRST TICK OF LIVE4 BECOMES BASE
+        if symbol not in last_base_vol:
+            last_base_vol[symbol] = base_vol
+            log("SYSTEM", f"{symbol} | LIVE4 BASE CAPTURED | base={base_vol}")
+
         return
 
     c["high"] = max(c["high"], ltp)
@@ -318,11 +325,7 @@ def receive_bias():
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        if s in last_ws_base_before_bias:
-            last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE4 BASE SET | base={last_base_vol[s]}")
-
-    log("SYSTEM", "History loaded – system LIVE")
+    log("SYSTEM", "History loaded – waiting for LIVE4")
 
     return jsonify({"status": "bias_received"})
 
