@@ -1,41 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# VOLCHK ONLY VERSION – BOUNDARY CORRECTED
-# ============================================================
-
-"""
-============================================================
-FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
-============================================================
-
-PHASE 1 – DEPLOY
-1) ENV load
-2) Logs cleared
-3) Settings fetch
-4) WebSocket connect (ALL symbols)
-
-PHASE 2 – LOCAL BIAS WAIT
-5) Local system waits till BIAS_TIME
-6) Local pushes strong_sectors + selected_stocks
-7) Render receives bias
-8) Create STOCK_BIAS_MAP
-9) Filter ACTIVE_SYMBOLS
-10) Unsubscribe non-active symbols
-
-PHASE 3 – HISTORY LOAD
-11) Load 3 history candles
-12) Set LIVE boundary base snapshot
-13) System LIVE
-
-PHASE 4 – LIVE CANDLE ENGINE
-14) Build LIVE4, LIVE5...
-15) VOLCHK logging only (no signal / no orders)
-
-============================================================
-"""
-
-# ============================================================
-# IMPORTS
+# RajanTradeAutomation – DEBUG ENGINE (LOCAL BIAS MODE)
+# VOLCHK ONLY – HISTORY BASELINE VERSION (PORTAL MATCH)
 # ============================================================
 
 import os
@@ -109,7 +74,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE (VOLCHK ONLY)")
+log("SYSTEM", "DEBUG ENGINE START – HISTORY BASELINE MODE")
 
 # ============================================================
 # SETTINGS
@@ -129,10 +94,6 @@ SETTINGS = get_settings()
 
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
-BIAS_TIME = SETTINGS.get("BIAS_TIME")
-
-log("SYSTEM", f"BIAS_TIME (Sheet) = {BIAS_TIME}")
-log("SYSTEM", "Waiting for local bias push...")
 
 # ============================================================
 # STATE
@@ -145,15 +106,12 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-boundary_base_snapshot = {}
-last_ws_base_before_bias = {}
-
 volume_history = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY FETCH (3 CANDLES)
+# HISTORY FETCH
 # ============================================================
 
 def fetch_three_history_candles(symbol, end_ts):
@@ -166,6 +124,29 @@ def fetch_three_history_candles(symbol, end_ts):
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
+
+def fetch_boundary_cumulative(symbol, boundary_ts):
+    """
+    Fetch exact cumulative volume at boundary time
+    """
+    res = fyers.history({
+        "symbol": symbol,
+        "resolution": "1",
+        "date_format": "0",
+        "range_from": boundary_ts,
+        "range_to": boundary_ts,
+        "cont_flag": "1"
+    })
+
+    if res.get("s") != "ok":
+        return None
+
+    candles = res.get("candles", [])
+    if not candles:
+        return None
+
+    # volume is index 5
+    return candles[0][5]
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -180,17 +161,10 @@ def close_live_candle(symbol, c):
     candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
-    volume_history.setdefault(symbol, []).append(candle_vol)
-
-    color = "RED" if c["open"] > c["close"] else \
-            "GREEN" if c["open"] < c["close"] else "DOJI"
-
-    bias = STOCK_BIAS_MAP.get(symbol, "")
-
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 4}"
 
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | {color} {bias}")
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)}")
 
 # ============================================================
 # UPDATE CANDLE
@@ -206,12 +180,7 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
-    # 🔥 Capture exact 5-min boundary base
-    if ts % CANDLE_INTERVAL == 0:
-        boundary_base_snapshot[symbol] = base_vol
-
     if not BIAS_DONE:
-        last_ws_base_before_bias[symbol] = base_vol
         return
 
     if symbol not in ACTIVE_SYMBOLS:
@@ -249,7 +218,6 @@ def on_message(msg):
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-    log("SYSTEM", f"Subscribed ALL_SYMBOLS={len(ALL_SYMBOLS)}")
 
 def start_ws():
     global fyers_ws
@@ -279,31 +247,17 @@ def receive_bias():
     bias_ts = int(datetime.now(UTC).timestamp())
     BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
 
-    log("BIAS", f"Bias received from LOCAL at {fmt_ist(bias_ts)}")
-
-    filtered = (
-        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
-        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
-    )
-
-    for s in filtered:
-        log(
-            "BIAS",
-            f"{s['bias']} - {s['sector']} - "
-            f"Advance {s['up_pct']}% Decline {s['down_pct']}%"
-        )
+    log("BIAS", f"Bias received at {fmt_ist(bias_ts)}")
 
     STOCK_BIAS_MAP.clear()
 
-    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+    for s in strong:
         key = SECTOR_LIST.get(s["sector"])
+        if not key:
+            continue
+        bias_char = "B" if s["bias"] == "BUY" else "S"
         for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "B"
-
-    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
-        key = SECTOR_LIST.get(s["sector"])
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = "S"
+            STOCK_BIAS_MAP[sym] = bias_char
 
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
@@ -316,36 +270,23 @@ def receive_bias():
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
     for s in ACTIVE_SYMBOLS:
-        volume_history.setdefault(s, [])
 
         history = fetch_three_history_candles(s, BT_FLOOR_TS)
         for ts, o, h, l, c, v in history[:3]:
-            volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        if s in boundary_base_snapshot:
-            last_base_vol[s] = boundary_base_snapshot[s]
-            log("SYSTEM", f"{s} | BASE SNAPSHOT USED")
+        boundary_base = fetch_boundary_cumulative(s, BT_FLOOR_TS)
+
+        if boundary_base is not None:
+            last_base_vol[s] = boundary_base
+            log("SYSTEM", f"{s} | HISTORY BASELINE USED")
         else:
-            last_base_vol[s] = last_ws_base_before_bias.get(s, 0)
-            log("SYSTEM", f"{s} | BASE FALLBACK USED")
+            last_base_vol[s] = 0
+            log("SYSTEM", f"{s} | BASELINE FALLBACK=0")
 
     log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
-
-# ============================================================
-# ROUTES
-# ============================================================
-
-@app.route("/")
-def health():
-    return jsonify({"status": "ok"})
-
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    log("SYSTEM", "FYERS redirect hit")
-    return jsonify({"status": "ok"})
 
 # ============================================================
 # START
