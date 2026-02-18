@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – DEBUG ENGINE (LOCAL BIAS MODE)
-# VOLCHK ONLY – HISTORY BASELINE VERSION (PORTAL MATCH)
+# VOLCHK ONLY – HISTORY BASELINE + FULL ROUTES RESTORED
 # ============================================================
 
 import os
@@ -106,12 +106,11 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
-volume_history = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY FETCH
+# HISTORY
 # ============================================================
 
 def fetch_three_history_candles(symbol, end_ts):
@@ -126,9 +125,6 @@ def fetch_three_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 def fetch_boundary_cumulative(symbol, boundary_ts):
-    """
-    Fetch exact cumulative volume at boundary time
-    """
     res = fyers.history({
         "symbol": symbol,
         "resolution": "1",
@@ -137,15 +133,11 @@ def fetch_boundary_cumulative(symbol, boundary_ts):
         "range_to": boundary_ts,
         "cont_flag": "1"
     })
-
     if res.get("s") != "ok":
         return None
-
     candles = res.get("candles", [])
     if not candles:
         return None
-
-    # volume is index 5
     return candles[0][5]
 
 # ============================================================
@@ -249,12 +241,15 @@ def receive_bias():
 
     log("BIAS", f"Bias received at {fmt_ist(bias_ts)}")
 
+    filtered = (
+        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
+        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
+    )
+
     STOCK_BIAS_MAP.clear()
 
-    for s in strong:
+    for s in filtered:
         key = SECTOR_LIST.get(s["sector"])
-        if not key:
-            continue
         bias_char = "B" if s["bias"] == "BUY" else "S"
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = bias_char
@@ -287,6 +282,19 @@ def receive_bias():
     log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@app.route("/")
+def health():
+    return jsonify({"status": "ok"})
+
+@app.route("/fyers-redirect")
+def fyers_redirect():
+    log("SYSTEM", "FYERS redirect hit")
+    return jsonify({"status": "ok"})
 
 # ============================================================
 # START
