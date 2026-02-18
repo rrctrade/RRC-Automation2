@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – DEBUG ENGINE (LOCAL BIAS MODE)
-# VOLCHK ONLY – HISTORY BASELINE + FULL ROUTES RESTORED
+# VOLCHK ONLY – WS BASELINE VERSION (NO BOUNDARY HACK)
 # ============================================================
 
 import os
@@ -74,7 +74,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "DEBUG ENGINE START – HISTORY BASELINE MODE")
+log("SYSTEM", "DEBUG ENGINE START – WS BASELINE MODE")
 
 # ============================================================
 # SETTINGS
@@ -94,6 +94,10 @@ SETTINGS = get_settings()
 
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
+BIAS_TIME = SETTINGS.get("BIAS_TIME")
+
+log("SYSTEM", f"BIAS_TIME (Sheet) = {BIAS_TIME}")
+log("SYSTEM", "Waiting for local bias push...")
 
 # ============================================================
 # STATE
@@ -106,11 +110,14 @@ BIAS_DONE = False
 
 candles = {}
 last_base_vol = {}
+last_ws_base_before_bias = {}
+
+volume_history = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY
+# HISTORY FETCH (3 CANDLES)
 # ============================================================
 
 def fetch_three_history_candles(symbol, end_ts):
@@ -123,22 +130,6 @@ def fetch_three_history_candles(symbol, end_ts):
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
-
-def fetch_boundary_cumulative(symbol, boundary_ts):
-    res = fyers.history({
-        "symbol": symbol,
-        "resolution": "1",
-        "date_format": "0",
-        "range_from": boundary_ts,
-        "range_to": boundary_ts,
-        "cont_flag": "1"
-    })
-    if res.get("s") != "ok":
-        return None
-    candles = res.get("candles", [])
-    if not candles:
-        return None
-    return candles[0][5]
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -153,10 +144,20 @@ def close_live_candle(symbol, c):
     candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
+    volume_history.setdefault(symbol, []).append(candle_vol)
+
+    color = (
+        "RED" if c["open"] > c["close"]
+        else "GREEN" if c["open"] < c["close"]
+        else "DOJI"
+    )
+
+    bias = STOCK_BIAS_MAP.get(symbol, "")
+
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
     label = f"LIVE{offset + 4}"
 
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)}")
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | {color} {bias}")
 
 # ============================================================
 # UPDATE CANDLE
@@ -172,7 +173,9 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
+    # WS cumulative capture before bias
     if not BIAS_DONE:
+        last_ws_base_before_bias[symbol] = base_vol
         return
 
     if symbol not in ACTIVE_SYMBOLS:
@@ -210,6 +213,7 @@ def on_message(msg):
 def on_connect():
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+    log("SYSTEM", f"Subscribed ALL_SYMBOLS={len(ALL_SYMBOLS)}")
 
 def start_ws():
     global fyers_ws
@@ -239,14 +243,23 @@ def receive_bias():
     bias_ts = int(datetime.now(UTC).timestamp())
     BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
 
-    log("BIAS", f"Bias received at {fmt_ist(bias_ts)}")
+    log("BIAS", f"Bias received from LOCAL at {fmt_ist(bias_ts)}")
 
+    # Sector filter restored
     filtered = (
         [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
         [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
     )
 
+    for s in filtered:
+        log(
+            "BIAS",
+            f"{s['bias']} - {s['sector']} - "
+            f"Advance {s['up_pct']}% Decline {s['down_pct']}%"
+        )
+
     STOCK_BIAS_MAP.clear()
+    ACTIVE_SYMBOLS.clear()
 
     for s in filtered:
         key = SECTOR_LIST.get(s["sector"])
@@ -266,15 +279,17 @@ def receive_bias():
 
     for s in ACTIVE_SYMBOLS:
 
+        volume_history.setdefault(s, [])
+
         history = fetch_three_history_candles(s, BT_FLOOR_TS)
-        for ts, o, h, l, c, v in history[:3]:
+        for ts, o, h, l, c_, v in history[:3]:
+            volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        boundary_base = fetch_boundary_cumulative(s, BT_FLOOR_TS)
-
-        if boundary_base is not None:
-            last_base_vol[s] = boundary_base
-            log("SYSTEM", f"{s} | HISTORY BASELINE USED")
+        # 🔥 BASELINE = LAST WS CUMULATIVE BEFORE BIAS
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | WS BASELINE USED | base={last_base_vol[s]}")
         else:
             last_base_vol[s] = 0
             log("SYSTEM", f"{s} | BASELINE FALLBACK=0")
