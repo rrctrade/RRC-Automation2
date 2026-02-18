@@ -1,10 +1,11 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# WITH MAX_TRADES_PER_DAY CONTROL
+# STABLE VERSION + MAX_TRADES_PER_DAY CONTROL
 # ============================================================
 
 """
-FULL SYSTEM FLOW (UNCHANGED)
+FULL SYSTEM FLOW (ORIGINAL STABLE)
++ MAX_TRADES_PER_DAY EXECUTION LIMIT
 """
 
 # ============================================================
@@ -209,6 +210,9 @@ def close_live_candle(symbol, c):
             log_fn=lambda m: log("ORDER", m)
         )
 
+    if TRADE_LIMIT_REACHED:
+        return
+
     if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
 
         sc = signal_counter.get(symbol, 0) + 1
@@ -264,6 +268,7 @@ def update_candle(msg):
     new_state = ORDER_STATE.get(symbol)
     new_status = new_state.get("status") if new_state else None
 
+    # Detect fresh execution
     if prev_status == "PENDING" and new_status == "SL_PLACED":
 
         TRADE_COUNT += 1
@@ -273,6 +278,7 @@ def update_candle(msg):
             TRADE_LIMIT_REACHED = True
             cancel_all_pending()
 
+    # Candle aggregation
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
 
@@ -295,7 +301,73 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# ROUTES (UNCHANGED)
+# WEBSOCKET
+# ============================================================
+
+def on_message(msg):
+    update_candle(msg)
+
+def on_connect():
+    log("SYSTEM", "WS CONNECTED")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+# ============================================================
+# LOCAL BIAS RECEIVE
+# ============================================================
+
+@app.route("/push-sector-bias", methods=["POST"])
+def receive_bias():
+
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
+
+    data = request.get_json(force=True)
+    strong = data.get("strong_sectors", [])
+    selected = data.get("selected_stocks", [])
+
+    bias_ts = int(datetime.now(UTC).timestamp())
+    BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
+
+    log("BIAS", "Bias received from LOCAL")
+
+    STOCK_BIAS_MAP.clear()
+    ACTIVE_SYMBOLS.clear()
+
+    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "B"
+
+    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "S"
+
+    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
+    BIAS_DONE = True
+
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
+        data_type="SymbolUpdate"
+    )
+
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+    return jsonify({"status": "bias_received"})
+
+# ============================================================
+# ROUTES
 # ============================================================
 
 @app.route("/")
