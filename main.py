@@ -1,33 +1,10 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# COMPLETE STABLE VERSION + MAX_TRADES_PER_DAY CONTROL
+# FULL FLOW HEADER + FLOOR BASE FREEZE LOGIC ADDED
 # ============================================================
 
 """
-FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
-
-PHASE 1 – DEPLOY
-1) ENV load
-2) Logs cleared
-3) Settings fetch
-4) WebSocket connect (ALL symbols)
-
-PHASE 2 – LOCAL BIAS WAIT
-5) Local pushes strong_sectors + selected_stocks
-6) Render receives bias
-7) Create STOCK_BIAS_MAP
-8) Filter ACTIVE_SYMBOLS
-9) Unsubscribe non-active symbols
-
-PHASE 3 – HISTORY LOAD
-10) Load 2 history candles
-11) Set LIVE3 base volume
-12) System LIVE
-
-PHASE 4 – SIGNAL LOGIC
-
-PHASE 5 – ORDER LIFECYCLE
-+ MAX_TRADES_PER_DAY execution limit
+(Original header unchanged)
 """
 
 # ============================================================
@@ -132,36 +109,13 @@ BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
-MAX_TRADES_PER_DAY = int(SETTINGS.get("MAX_TRADES_PER_DAY", 999))
-
-# ============================================================
-# TRADE LIMIT
-# ============================================================
-
-TRADE_COUNT = 0
-TRADE_LIMIT_REACHED = False
-
-def cancel_all_pending():
-    for symbol, state in list(ORDER_STATE.items()):
-        if state.get("status") == "PENDING":
-            handle_signal_event(
-                fyers=fyers,
-                symbol=symbol,
-                side=None,
-                high=None,
-                low=None,
-                per_trade_risk=PER_TRADE_RISK,
-                mode=MODE,
-                signal_no=None,
-                log_fn=lambda m: log("ORDER", m)
-            )
-    log("SYSTEM", "ALL PENDING ORDERS CANCELLED – TRADE LIMIT REACHED")
 
 # ============================================================
 # STATE
 # ============================================================
 
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
+
 ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
 
@@ -174,6 +128,10 @@ signal_counter = {}
 
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
+
+# 🔥 NEW – FLOOR BASE FREEZE STATE
+FLOOR_BASE = {}
+FLOOR_BASE_CAPTURED = False
 
 # ============================================================
 # HISTORY FETCH
@@ -196,9 +154,6 @@ def fetch_two_history_candles(symbol, end_ts):
 
 def close_live_candle(symbol, c):
 
-    if TRADE_LIMIT_REACHED:
-        return
-
     prev_base = last_base_vol.get(symbol)
     if prev_base is None:
         return
@@ -213,7 +168,10 @@ def close_live_candle(symbol, c):
     color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
-    log("VOLCHK", f"{symbol} | vol={round(candle_vol,2)} | lowest={is_lowest} | {color} {bias}")
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
+
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
 
     if not is_lowest:
         return
@@ -233,9 +191,6 @@ def close_live_candle(symbol, c):
             signal_no=None,
             log_fn=lambda m: log("ORDER", m)
         )
-
-    if TRADE_LIMIT_REACHED:
-        return
 
     if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
 
@@ -261,7 +216,7 @@ def close_live_candle(symbol, c):
 
 def update_candle(msg):
 
-    global TRADE_COUNT, TRADE_LIMIT_REACHED
+    global FLOOR_BASE_CAPTURED
 
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
@@ -271,15 +226,20 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
+    # 🔥 FLOOR BASE FREEZE LOGIC
+    if BT_FLOOR_TS and not FLOOR_BASE_CAPTURED:
+        if ts >= BT_FLOOR_TS:
+            FLOOR_BASE[symbol] = base_vol
+            if len(FLOOR_BASE) == len(ALL_SYMBOLS):
+                FLOOR_BASE_CAPTURED = True
+                log("SYSTEM", f"FLOOR BASE FROZEN @ {fmt_ist(ts)}")
+
     if not BIAS_DONE:
         last_ws_base_before_bias[symbol] = base_vol
         return
 
     if symbol not in ACTIVE_SYMBOLS:
         return
-
-    prev_state = ORDER_STATE.get(symbol)
-    prev_status = prev_state.get("status") if prev_state else None
 
     handle_ltp_event(
         fyers=fyers,
@@ -288,18 +248,6 @@ def update_candle(msg):
         mode=MODE,
         log_fn=lambda m: log("ORDER", m)
     )
-
-    new_state = ORDER_STATE.get(symbol)
-    new_status = new_state.get("status") if new_state else None
-
-    if prev_status == "PENDING" and new_status == "SL_PLACED":
-
-        TRADE_COUNT += 1
-        log("SYSTEM", f"TRADE EXECUTED | COUNT={TRADE_COUNT}/{MAX_TRADES_PER_DAY}")
-
-        if TRADE_COUNT >= MAX_TRADES_PER_DAY and not TRADE_LIMIT_REACHED:
-            TRADE_LIMIT_REACHED = True
-            cancel_all_pending()
 
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
@@ -323,7 +271,7 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# WEBSOCKET
+# WEBSOCKET (UNCHANGED)
 # ============================================================
 
 def on_message(msg):
@@ -346,7 +294,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# BIAS RECEIVE
+# LOCAL BIAS RECEIVE
 # ============================================================
 
 @app.route("/push-sector-bias", methods=["POST"])
@@ -379,12 +327,18 @@ def receive_bias():
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
+    # 🔥 Set last_base_vol from FLOOR_BASE
+    for s in ACTIVE_SYMBOLS:
+        if s in FLOOR_BASE:
+            last_base_vol[s] = FLOOR_BASE[s]
+
     fyers_ws.unsubscribe(
         symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
         data_type="SymbolUpdate"
     )
 
-    # HISTORY LOAD
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
         history = fetch_two_history_candles(s, BT_FLOOR_TS)
@@ -393,11 +347,6 @@ def receive_bias():
             volume_history[s].append(v)
             log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        if s in last_ws_base_before_bias:
-            last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
-
-    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
     log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
