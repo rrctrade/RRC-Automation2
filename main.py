@@ -1,6 +1,14 @@
 # ============================================================
-# RajanTradeAutomation – DEBUG ENGINE (LOCAL BIAS MODE)
-# VOLCHK ONLY – WS BASELINE VERSION (NO BOUNDARY HACK)
+# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
+# WITH MAX_TRADES_PER_DAY CONTROL
+# ============================================================
+
+"""
+FULL SYSTEM FLOW (UNCHANGED)
+"""
+
+# ============================================================
+# IMPORTS
 # ============================================================
 
 import os
@@ -16,6 +24,11 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 from sector_mapping import SECTOR_MAP
 from sector_engine import SECTOR_LIST
+from signal_candle_order import (
+    handle_signal_event,
+    handle_ltp_event,
+    ORDER_STATE
+)
 
 # ============================================================
 # TIME
@@ -74,7 +87,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "DEBUG ENGINE START – WS BASELINE MODE")
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE")
 
 # ============================================================
 # SETTINGS
@@ -94,17 +107,38 @@ SETTINGS = get_settings()
 
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
-BIAS_TIME = SETTINGS.get("BIAS_TIME")
+PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
+MODE = SETTINGS.get("MODE", "PAPER")
+MAX_TRADES_PER_DAY = int(SETTINGS.get("MAX_TRADES_PER_DAY", 999))
 
-log("SYSTEM", f"BIAS_TIME (Sheet) = {BIAS_TIME}")
-log("SYSTEM", "Waiting for local bias push...")
+# ============================================================
+# TRADE LIMIT STATE
+# ============================================================
+
+TRADE_COUNT = 0
+TRADE_LIMIT_REACHED = False
+
+def cancel_all_pending():
+    for symbol, state in list(ORDER_STATE.items()):
+        if state.get("status") == "PENDING":
+            handle_signal_event(
+                fyers=fyers,
+                symbol=symbol,
+                side=None,
+                high=None,
+                low=None,
+                per_trade_risk=PER_TRADE_RISK,
+                mode=MODE,
+                signal_no=None,
+                log_fn=lambda m: log("ORDER", m)
+            )
+    log("SYSTEM", "ALL PENDING ORDERS CANCELLED – TRADE LIMIT REACHED")
 
 # ============================================================
 # STATE
 # ============================================================
 
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
-
 ACTIVE_SYMBOLS = set()
 BIAS_DONE = False
 
@@ -113,19 +147,21 @@ last_base_vol = {}
 last_ws_base_before_bias = {}
 
 volume_history = {}
+signal_counter = {}
+
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# HISTORY FETCH (3 CANDLES)
+# HISTORY FETCH
 # ============================================================
 
-def fetch_three_history_candles(symbol, end_ts):
+def fetch_two_history_candles(symbol, end_ts):
     res = fyers.history({
         "symbol": symbol,
         "resolution": "5",
         "date_format": "0",
-        "range_from": int(end_ts - 900),
+        "range_from": int(end_ts - 600),
         "range_to": int(end_ts - 1),
         "cont_flag": "1"
     })
@@ -137,6 +173,9 @@ def fetch_three_history_candles(symbol, end_ts):
 
 def close_live_candle(symbol, c):
 
+    if TRADE_LIMIT_REACHED:
+        return
+
     prev_base = last_base_vol.get(symbol)
     if prev_base is None:
         return
@@ -144,26 +183,57 @@ def close_live_candle(symbol, c):
     candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
+    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
+    is_lowest = prev_min is not None and candle_vol < prev_min
     volume_history.setdefault(symbol, []).append(candle_vol)
 
-    color = (
-        "RED" if c["open"] > c["close"]
-        else "GREEN" if c["open"] < c["close"]
-        else "DOJI"
-    )
-
+    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
-    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
-    label = f"LIVE{offset + 4}"
+    if not is_lowest:
+        return
 
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | {color} {bias}")
+    state = ORDER_STATE.get(symbol)
+    status = state.get("status") if state else None
+
+    if status == "PENDING":
+        handle_signal_event(
+            fyers=fyers,
+            symbol=symbol,
+            side=None,
+            high=None,
+            low=None,
+            per_trade_risk=PER_TRADE_RISK,
+            mode=MODE,
+            signal_no=None,
+            log_fn=lambda m: log("ORDER", m)
+        )
+
+    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
+
+        sc = signal_counter.get(symbol, 0) + 1
+        signal_counter[symbol] = sc
+        side = "BUY" if bias == "B" else "SELL"
+
+        handle_signal_event(
+            fyers=fyers,
+            symbol=symbol,
+            side=side,
+            high=c["high"],
+            low=c["low"],
+            per_trade_risk=PER_TRADE_RISK,
+            mode=MODE,
+            signal_no=sc,
+            log_fn=lambda m: log("ORDER", m)
+        )
 
 # ============================================================
 # UPDATE CANDLE
 # ============================================================
 
 def update_candle(msg):
+
+    global TRADE_COUNT, TRADE_LIMIT_REACHED
 
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
@@ -173,7 +243,6 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
-    # WS cumulative capture before bias
     if not BIAS_DONE:
         last_ws_base_before_bias[symbol] = base_vol
         return
@@ -181,13 +250,35 @@ def update_candle(msg):
     if symbol not in ACTIVE_SYMBOLS:
         return
 
+    prev_state = ORDER_STATE.get(symbol)
+    prev_status = prev_state.get("status") if prev_state else None
+
+    handle_ltp_event(
+        fyers=fyers,
+        symbol=symbol,
+        ltp=ltp,
+        mode=MODE,
+        log_fn=lambda m: log("ORDER", m)
+    )
+
+    new_state = ORDER_STATE.get(symbol)
+    new_status = new_state.get("status") if new_state else None
+
+    if prev_status == "PENDING" and new_status == "SL_PLACED":
+
+        TRADE_COUNT += 1
+        log("SYSTEM", f"TRADE EXECUTED | COUNT={TRADE_COUNT}/{MAX_TRADES_PER_DAY}")
+
+        if TRADE_COUNT >= MAX_TRADES_PER_DAY and not TRADE_LIMIT_REACHED:
+            TRADE_LIMIT_REACHED = True
+            cancel_all_pending()
+
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
         if c:
             close_live_candle(symbol, c)
-
         candles[symbol] = {
             "start": start,
             "open": ltp,
@@ -204,102 +295,7 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# WEBSOCKET
-# ============================================================
-
-def on_message(msg):
-    update_candle(msg)
-
-def on_connect():
-    log("SYSTEM", "WS CONNECTED")
-    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
-    log("SYSTEM", f"Subscribed ALL_SYMBOLS={len(ALL_SYMBOLS)}")
-
-def start_ws():
-    global fyers_ws
-    fyers_ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_message,
-        on_connect=on_connect,
-        reconnect=True
-    )
-    fyers_ws.connect()
-
-threading.Thread(target=start_ws, daemon=True).start()
-
-# ============================================================
-# RECEIVE LOCAL BIAS
-# ============================================================
-
-@app.route("/push-sector-bias", methods=["POST"])
-def receive_bias():
-
-    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
-
-    data = request.get_json(force=True)
-    strong = data.get("strong_sectors", [])
-    selected = data.get("selected_stocks", [])
-
-    bias_ts = int(datetime.now(UTC).timestamp())
-    BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
-
-    log("BIAS", f"Bias received from LOCAL at {fmt_ist(bias_ts)}")
-
-    # Sector filter restored
-    filtered = (
-        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
-        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
-    )
-
-    for s in filtered:
-        log(
-            "BIAS",
-            f"{s['bias']} - {s['sector']} - "
-            f"Advance {s['up_pct']}% Decline {s['down_pct']}%"
-        )
-
-    STOCK_BIAS_MAP.clear()
-    ACTIVE_SYMBOLS.clear()
-
-    for s in filtered:
-        key = SECTOR_LIST.get(s["sector"])
-        bias_char = "B" if s["bias"] == "BUY" else "S"
-        for sym in SECTOR_MAP.get(key, []):
-            STOCK_BIAS_MAP[sym] = bias_char
-
-    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
-    BIAS_DONE = True
-
-    fyers_ws.unsubscribe(
-        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
-        data_type="SymbolUpdate"
-    )
-
-    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
-    for s in ACTIVE_SYMBOLS:
-
-        volume_history.setdefault(s, [])
-
-        history = fetch_three_history_candles(s, BT_FLOOR_TS)
-        for ts, o, h, l, c_, v in history[:3]:
-            volume_history[s].append(v)
-            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
-
-        # 🔥 BASELINE = LAST WS CUMULATIVE BEFORE BIAS
-        if s in last_ws_base_before_bias:
-            last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | WS BASELINE USED | base={last_base_vol[s]}")
-        else:
-            last_base_vol[s] = 0
-            log("SYSTEM", f"{s} | BASELINE FALLBACK=0")
-
-    log("SYSTEM", "History loaded – system LIVE")
-
-    return jsonify({"status": "bias_received"})
-
-# ============================================================
-# ROUTES
+# ROUTES (UNCHANGED)
 # ============================================================
 
 @app.route("/")
