@@ -1,7 +1,7 @@
 # ============================================================
 # signal_candle_order.py
 # RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
-# FINAL VERSION – WITH TRADING LOCK SUPPORT
+# FINAL VERSION – WITH ORDER_EXECUTED LOG FIX
 # Compatible with main.py (LOCAL BIAS MODE)
 # ============================================================
 
@@ -99,14 +99,6 @@ def handle_signal_event(**kwargs):
     mode = kwargs["mode"]
     log_fn = kwargs["log_fn"]
     side = kwargs.get("side")
-    trading_lock = kwargs.get("trading_lock", False)
-
-    # --------------------------------------------------------
-    # GLOBAL TRADING LOCK
-    # --------------------------------------------------------
-    if trading_lock:
-        log_fn(f"TRADING_LOCK_ACTIVE | {symbol} | SIGNAL_IGNORED")
-        return
 
     state = ORDER_STATE.get(symbol)
 
