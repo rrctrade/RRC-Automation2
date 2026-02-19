@@ -3,23 +3,24 @@
 # FULL FLOW HEADER + FULL LOGGING + DYNAMIC WS DETECT
 # PURE LIVE MODE VOLUME FIXED
 # STRICT SIGNAL START FROM 4TH CANDLE
-# MAX_TRADES_PER_DAY LIMIT ADDED (SYNCHRONIZED VERSION)
+# MAX_TRADES_PER_DAY LIMIT ADDED
 # ============================================================
 
 """
 ============================================================
 FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
 
-WS DETECTION:
-Before 09:15 → PURE LIVE MODE
-After 09:15 → HISTORY MODE
+WS DETECTION LAYER:
 
-SIGNAL:
-First 3 candles → volume only
-From 4th candle → signal eligible
+If WS connect BEFORE 09:15 → PURE LIVE MODE (NO HISTORY, NO BASE INJECTION)
+If WS connect AT/AFTER 09:15 → HISTORY MODE (UNCHANGED)
+
+SIGNAL LOGIC:
+First 3 completed candles → volume noted only
+Signal evaluation starts strictly from 4th candle
 
 NEW:
-MAX_TRADES_PER_DAY → Hard global trade cap
+MAX_TRADES_PER_DAY → Global trade cap
 ============================================================
 """
 
@@ -134,6 +135,19 @@ MAX_TRADES_PER_DAY = int(SETTINGS.get("MAX_TRADES_PER_DAY", 999))
 EXECUTED_TRADES = 0
 TRADING_LOCK = False
 
+def cancel_all_pending():
+    for symbol, state in list(ORDER_STATE.items()):
+        if state.get("status") == "PENDING":
+            if MODE == "LIVE" and state.get("signal_order_id"):
+                try:
+                    fyers.cancel_order({"id": state["signal_order_id"]})
+                    log("ORDER", f"GLOBAL_CANCEL | {symbol}")
+                except Exception as e:
+                    log("ERROR", f"GLOBAL_CANCEL_FAIL | {symbol} | {e}")
+            else:
+                log("ORDER", f"PAPER_GLOBAL_CANCEL | {symbol}")
+            ORDER_STATE.pop(symbol, None)
+
 # ============================================================
 # STATE
 # ============================================================
@@ -145,6 +159,7 @@ BIAS_DONE = False
 candles = {}
 last_base_vol = {}
 last_ws_base_before_bias = {}
+
 volume_history = {}
 signal_counter = {}
 
@@ -152,7 +167,7 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# WS DETECTION
+# DYNAMIC WS DETECTION
 # ============================================================
 
 WS_CONNECT_TIME = None
@@ -160,7 +175,7 @@ MARKET_OPEN_TIME = dt_time(9, 15, 0)
 HISTORY_MODE = True
 
 # ============================================================
-# HISTORY
+# HISTORY FETCH
 # ============================================================
 
 def fetch_two_history_candles(symbol, end_ts):
@@ -173,25 +188,6 @@ def fetch_two_history_candles(symbol, end_ts):
         "cont_flag": "1"
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
-
-# ============================================================
-# CANCEL ALL PENDING
-# ============================================================
-
-def cancel_all_pending():
-    for symbol, state in list(ORDER_STATE.items()):
-        if state.get("status") == "PENDING":
-
-            if MODE == "LIVE" and state.get("signal_order_id"):
-                try:
-                    fyers.cancel_order({"id": state["signal_order_id"]})
-                    log("ORDER", f"GLOBAL_CANCEL | {symbol}")
-                except Exception as e:
-                    log("ERROR", f"GLOBAL_CANCEL_FAIL | {symbol} | {e}")
-            else:
-                log("ORDER", f"PAPER_GLOBAL_CANCEL | {symbol}")
-
-            ORDER_STATE.pop(symbol, None)
 
 # ============================================================
 # CLOSE LIVE CANDLE
@@ -223,9 +219,7 @@ def close_live_candle(symbol, c):
     is_lowest = candle_vol < prev_min
     volume_history[symbol].append(candle_vol)
 
-    color = "RED" if c["open"] > c["close"] else \
-            "GREEN" if c["open"] < c["close"] else "DOJI"
-
+    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
     if not is_lowest:
@@ -248,8 +242,7 @@ def close_live_candle(symbol, c):
             trading_lock=TRADING_LOCK
         )
 
-    if (bias == "B" and color == "RED") or \
-       (bias == "S" and color == "GREEN"):
+    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
 
         sc = signal_counter.get(symbol, 0) + 1
         signal_counter[symbol] = sc
@@ -304,15 +297,12 @@ def update_candle(msg):
     new_status = ORDER_STATE.get(symbol, {}).get("status")
 
     if prev_status == "PENDING" and new_status == "EXECUTED":
-
         EXECUTED_TRADES += 1
         log("SYSTEM", f"TRADE_COUNT = {EXECUTED_TRADES}")
 
         if EXECUTED_TRADES >= MAX_TRADES_PER_DAY and not TRADING_LOCK:
-
             TRADING_LOCK = True
             log("SYSTEM", "MAX_TRADES_PER_DAY REACHED → TRADING LOCKED")
-
             cancel_all_pending()
 
     start = ts - (ts % CANDLE_INTERVAL)
@@ -337,7 +327,100 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# ROUTES & WS (UNCHANGED)
+# WEBSOCKET
+# ============================================================
+
+def on_message(msg):
+    update_candle(msg)
+
+def on_connect():
+    global WS_CONNECT_TIME, HISTORY_MODE
+
+    WS_CONNECT_TIME = datetime.now(IST).time()
+
+    if WS_CONNECT_TIME < MARKET_OPEN_TIME:
+        HISTORY_MODE = False
+        log("SYSTEM", "WS BEFORE 09:15 → PURE LIVE MODE")
+    else:
+        HISTORY_MODE = True
+        log("SYSTEM", "WS AFTER 09:15 → HISTORY MODE")
+
+    log("SYSTEM", "WS CONNECTED")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+# ============================================================
+# LOCAL BIAS RECEIVE
+# ============================================================
+
+@app.route("/push-sector-bias", methods=["POST"])
+def receive_bias():
+
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
+
+    data = request.get_json(force=True)
+    strong = data.get("strong_sectors", [])
+    selected = data.get("selected_stocks", [])
+
+    bias_ts = int(datetime.now(UTC).timestamp())
+    BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
+
+    log("BIAS", "Bias received from LOCAL")
+
+    STOCK_BIAS_MAP.clear()
+    ACTIVE_SYMBOLS.clear()
+
+    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "B"
+
+    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "S"
+
+    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
+    BIAS_DONE = True
+
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
+        data_type="SymbolUpdate"
+    )
+
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+    for s in ACTIVE_SYMBOLS:
+        volume_history.setdefault(s, [])
+
+        if HISTORY_MODE:
+            history = fetch_two_history_candles(s, BT_FLOOR_TS)
+
+            for ts, o, h, l, c, v in history[:2]:
+                volume_history[s].append(v)
+                log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+
+            if s in last_ws_base_before_bias:
+                last_base_vol[s] = last_ws_base_before_bias[s]
+                log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+
+    log("SYSTEM", "System LIVE")
+
+    return jsonify({"status": "bias_received"})
+
+# ============================================================
+# ROUTES
 # ============================================================
 
 @app.route("/")
@@ -348,6 +431,10 @@ def health():
 def fyers_redirect():
     log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
