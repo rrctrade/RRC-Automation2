@@ -2,6 +2,7 @@
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
 # FULL FLOW HEADER + FULL LOGGING + DYNAMIC WS DETECT
 # PURE LIVE MODE VOLUME FIXED
+# STRICT SIGNAL START FROM 4TH CANDLE
 # ============================================================
 
 """
@@ -13,7 +14,9 @@ WS DETECTION LAYER:
 If WS connect BEFORE 09:15 → PURE LIVE MODE (NO HISTORY, NO BASE INJECTION)
 If WS connect AT/AFTER 09:15 → HISTORY MODE (UNCHANGED)
 
-NO TRADING / SIGNAL / VOLUME LOGIC MODIFIED
+SIGNAL LOGIC:
+First 3 completed candles → volume noted only
+Signal evaluation starts strictly from 4th candle
 ============================================================
 """
 
@@ -170,7 +173,6 @@ def close_live_candle(symbol, c):
 
     prev_base = last_base_vol.get(symbol)
 
-    # PURE LIVE FIRST CANDLE BASE INIT
     if prev_base is None:
         last_base_vol[symbol] = c["base_vol"]
         return
@@ -178,9 +180,16 @@ def close_live_candle(symbol, c):
     candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
-    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = prev_min is not None and candle_vol < prev_min
-    volume_history.setdefault(symbol, []).append(candle_vol)
+    volume_history.setdefault(symbol, [])
+
+    # STRICT 4TH CANDLE START
+    if len(volume_history[symbol]) < 3:
+        volume_history[symbol].append(candle_vol)
+        return
+
+    prev_min = min(volume_history[symbol])
+    is_lowest = candle_vol < prev_min
+    volume_history[symbol].append(candle_vol)
 
     color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
@@ -291,10 +300,10 @@ def on_connect():
 
     if WS_CONNECT_TIME < MARKET_OPEN_TIME:
         HISTORY_MODE = False
-        log("SYSTEM", f"WS BEFORE 09:15 → PURE LIVE MODE")
+        log("SYSTEM", "WS BEFORE 09:15 → PURE LIVE MODE")
     else:
         HISTORY_MODE = True
-        log("SYSTEM", f"WS AFTER 09:15 → HISTORY MODE")
+        log("SYSTEM", "WS AFTER 09:15 → HISTORY MODE")
 
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
@@ -365,8 +374,6 @@ def receive_bias():
             if s in last_ws_base_before_bias:
                 last_base_vol[s] = last_ws_base_before_bias[s]
                 log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
-
-        # PURE LIVE MODE → NO BASE SET
 
     log("SYSTEM", "System LIVE")
 
