@@ -1,18 +1,19 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
 # FULL FLOW HEADER + FULL LOGGING + DYNAMIC WS DETECT
+# PURE LIVE MODE VOLUME FIXED
 # ============================================================
 
 """
 ============================================================
 FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
 
-WS DETECTION LAYER ADDED:
+WS DETECTION LAYER:
 
-If WS connect BEFORE 09:15 → HISTORY SKIPPED
-If WS connect AT/AFTER 09:15 → HISTORY RUNS (UNCHANGED)
+If WS connect BEFORE 09:15 → PURE LIVE MODE (NO HISTORY, NO BASE INJECTION)
+If WS connect AT/AFTER 09:15 → HISTORY MODE (UNCHANGED)
 
-NO OTHER LOGIC MODIFIED
+NO TRADING / SIGNAL / VOLUME LOGIC MODIFIED
 ============================================================
 """
 
@@ -139,12 +140,12 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# 🔥 DYNAMIC WS DETECTION LAYER
+# DYNAMIC WS DETECTION
 # ============================================================
 
 WS_CONNECT_TIME = None
 MARKET_OPEN_TIME = dt_time(9, 15, 0)
-HISTORY_MODE = True  # default
+HISTORY_MODE = True
 
 # ============================================================
 # HISTORY FETCH (UNCHANGED)
@@ -162,13 +163,16 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE (UNCHANGED)
+# CLOSE LIVE CANDLE
 # ============================================================
 
 def close_live_candle(symbol, c):
 
     prev_base = last_base_vol.get(symbol)
+
+    # PURE LIVE FIRST CANDLE BASE INIT
     if prev_base is None:
+        last_base_vol[symbol] = c["base_vol"]
         return
 
     candle_vol = c["base_vol"] - prev_base
@@ -287,10 +291,10 @@ def on_connect():
 
     if WS_CONNECT_TIME < MARKET_OPEN_TIME:
         HISTORY_MODE = False
-        log("SYSTEM", f"WS BEFORE 09:15 → HISTORY SKIPPED ({WS_CONNECT_TIME})")
+        log("SYSTEM", f"WS BEFORE 09:15 → PURE LIVE MODE")
     else:
         HISTORY_MODE = True
-        log("SYSTEM", f"WS AFTER 09:15 → HISTORY ENABLED ({WS_CONNECT_TIME})")
+        log("SYSTEM", f"WS AFTER 09:15 → HISTORY MODE")
 
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
@@ -351,7 +355,6 @@ def receive_bias():
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
 
-        # 🔥 CONDITIONAL HISTORY
         if HISTORY_MODE:
             history = fetch_two_history_candles(s, BT_FLOOR_TS)
 
@@ -362,11 +365,8 @@ def receive_bias():
             if s in last_ws_base_before_bias:
                 last_base_vol[s] = last_ws_base_before_bias[s]
                 log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
-        else:
-            # Pure live mode
-            if s in last_ws_base_before_bias:
-                last_base_vol[s] = last_ws_base_before_bias[s]
-                log("SYSTEM", f"{s} | PURE LIVE MODE BASE SET | base={last_base_vol[s]}")
+
+        # PURE LIVE MODE → NO BASE SET
 
     log("SYSTEM", "System LIVE")
 
