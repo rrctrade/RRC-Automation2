@@ -4,24 +4,21 @@
 # PURE LIVE MODE VOLUME FIXED
 # STRICT SIGNAL START FROM 4TH CANDLE
 # MAX_TRADES_PER_DAY LIMIT ADDED
+# RECONNECT SAFE VERSION
 # ============================================================
 
 """
-============================================================
 FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
 
-WS DETECTION LAYER:
+WS DETECTION:
+Before 09:15 → PURE LIVE
+After 09:15 → HISTORY MODE
 
-If WS connect BEFORE 09:15 → PURE LIVE MODE (NO HISTORY, NO BASE INJECTION)
-If WS connect AT/AFTER 09:15 → HISTORY MODE (UNCHANGED)
-
-SIGNAL LOGIC:
-First 3 completed candles → volume noted only
-Signal evaluation starts strictly from 4th candle
+Signal starts strictly from 4th completed candle
 
 NEW:
-MAX_TRADES_PER_DAY → Global trade cap
-============================================================
+- MAX_TRADES_PER_DAY global cap
+- WebSocket reconnect safe
 """
 
 # ============================================================
@@ -104,7 +101,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE")
+log("SYSTEM", "ENGINE START – LOCAL BIAS MODE")
 
 # ============================================================
 # SETTINGS
@@ -167,7 +164,7 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# DYNAMIC WS DETECTION
+# WS DETECTION
 # ============================================================
 
 WS_CONNECT_TIME = None
@@ -198,7 +195,6 @@ def close_live_candle(symbol, c):
     global TRADING_LOCK
 
     prev_base = last_base_vol.get(symbol)
-
     if prev_base is None:
         last_base_vol[symbol] = c["base_vol"]
         return
@@ -219,7 +215,9 @@ def close_live_candle(symbol, c):
     is_lowest = candle_vol < prev_min
     volume_history[symbol].append(candle_vol)
 
-    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
+    color = "RED" if c["open"] > c["close"] else \
+            "GREEN" if c["open"] < c["close"] else "DOJI"
+
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
     if not is_lowest:
@@ -242,7 +240,8 @@ def close_live_candle(symbol, c):
             trading_lock=TRADING_LOCK
         )
 
-    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
+    if (bias == "B" and color == "RED") or \
+       (bias == "S" and color == "GREEN"):
 
         sc = signal_counter.get(symbol, 0) + 1
         signal_counter[symbol] = sc
@@ -346,7 +345,20 @@ def on_connect():
         log("SYSTEM", "WS AFTER 09:15 → HISTORY MODE")
 
     log("SYSTEM", "WS CONNECTED")
-    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+
+    # 🔥 RECONNECT SAFE
+    if BIAS_DONE and ACTIVE_SYMBOLS:
+        fyers_ws.subscribe(
+            symbols=list(ACTIVE_SYMBOLS),
+            data_type="SymbolUpdate"
+        )
+        log("SYSTEM", f"RECONNECTED → Subscribed ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+    else:
+        fyers_ws.subscribe(
+            symbols=ALL_SYMBOLS,
+            data_type="SymbolUpdate"
+        )
+        log("SYSTEM", "Subscribed FULL UNIVERSE")
 
 def start_ws():
     global fyers_ws
@@ -361,7 +373,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# LOCAL BIAS RECEIVE
+# RECEIVE BIAS
 # ============================================================
 
 @app.route("/push-sector-bias", methods=["POST"])
@@ -394,28 +406,7 @@ def receive_bias():
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
-    fyers_ws.unsubscribe(
-        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
-        data_type="SymbolUpdate"
-    )
-
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
-    for s in ACTIVE_SYMBOLS:
-        volume_history.setdefault(s, [])
-
-        if HISTORY_MODE:
-            history = fetch_two_history_candles(s, BT_FLOOR_TS)
-
-            for ts, o, h, l, c, v in history[:2]:
-                volume_history[s].append(v)
-                log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
-
-            if s in last_ws_base_before_bias:
-                last_base_vol[s] = last_ws_base_before_bias[s]
-                log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
-
-    log("SYSTEM", "System LIVE")
 
     return jsonify({"status": "bias_received"})
 
