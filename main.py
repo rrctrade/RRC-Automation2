@@ -3,6 +3,7 @@
 # FULL FLOW HEADER + FULL LOGGING + DYNAMIC WS DETECT
 # PURE LIVE MODE VOLUME FIXED
 # STRICT SIGNAL START FROM 4TH CANDLE
+# MAX_TRADES_PER_DAY LIMIT ADDED
 # ============================================================
 
 """
@@ -10,13 +11,15 @@
 FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
 
 WS DETECTION LAYER:
-
-If WS connect BEFORE 09:15 → PURE LIVE MODE (NO HISTORY, NO BASE INJECTION)
-If WS connect AT/AFTER 09:15 → HISTORY MODE (UNCHANGED)
+If WS connect BEFORE 09:15 → PURE LIVE MODE
+If WS connect AT/AFTER 09:15 → HISTORY MODE
 
 SIGNAL LOGIC:
 First 3 completed candles → volume noted only
 Signal evaluation starts strictly from 4th candle
+
+NEW:
+MAX_TRADES_PER_DAY → Hard global trade cap
 ============================================================
 """
 
@@ -122,6 +125,14 @@ BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
 SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
+MAX_TRADES_PER_DAY = int(SETTINGS.get("MAX_TRADES_PER_DAY", 999))
+
+# ============================================================
+# GLOBAL TRADE CONTROL
+# ============================================================
+
+EXECUTED_TRADES = 0
+TRADING_LOCK = False
 
 # ============================================================
 # STATE
@@ -151,7 +162,7 @@ MARKET_OPEN_TIME = dt_time(9, 15, 0)
 HISTORY_MODE = True
 
 # ============================================================
-# HISTORY FETCH (UNCHANGED)
+# HISTORY FETCH
 # ============================================================
 
 def fetch_two_history_candles(symbol, end_ts):
@@ -166,10 +177,31 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
+# CANCEL ALL PENDING ORDERS
+# ============================================================
+
+def cancel_all_pending():
+    for symbol, state in list(ORDER_STATE.items()):
+        if state.get("status") == "PENDING":
+
+            if MODE == "LIVE" and state.get("signal_order_id"):
+                try:
+                    fyers.cancel_order({"id": state["signal_order_id"]})
+                    log("ORDER", f"GLOBAL_CANCEL | {symbol}")
+                except Exception as e:
+                    log("ERROR", f"GLOBAL_CANCEL_FAIL | {symbol} | {e}")
+            else:
+                log("ORDER", f"PAPER_GLOBAL_CANCEL | {symbol}")
+
+            ORDER_STATE.pop(symbol, None)
+
+# ============================================================
 # CLOSE LIVE CANDLE
 # ============================================================
 
 def close_live_candle(symbol, c):
+
+    global TRADING_LOCK
 
     prev_base = last_base_vol.get(symbol)
 
@@ -182,22 +214,21 @@ def close_live_candle(symbol, c):
 
     volume_history.setdefault(symbol, [])
 
-    # STRICT 4TH CANDLE START
     if len(volume_history[symbol]) < 3:
         volume_history[symbol].append(candle_vol)
+        return
+
+    if TRADING_LOCK:
         return
 
     prev_min = min(volume_history[symbol])
     is_lowest = candle_vol < prev_min
     volume_history[symbol].append(candle_vol)
 
-    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
+    color = "RED" if c["open"] > c["close"] else \
+            "GREEN" if c["open"] < c["close"] else "DOJI"
+
     bias = STOCK_BIAS_MAP.get(symbol, "")
-
-    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
-    label = f"LIVE{offset + 3}"
-
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
 
     if not is_lowest:
         return
@@ -218,7 +249,8 @@ def close_live_candle(symbol, c):
             log_fn=lambda m: log("ORDER", m)
         )
 
-    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
+    if (bias == "B" and color == "RED") or \
+       (bias == "S" and color == "GREEN"):
 
         sc = signal_counter.get(symbol, 0) + 1
         signal_counter[symbol] = sc
@@ -237,10 +269,12 @@ def close_live_candle(symbol, c):
         )
 
 # ============================================================
-# UPDATE CANDLE (UNCHANGED)
+# UPDATE CANDLE
 # ============================================================
 
 def update_candle(msg):
+
+    global EXECUTED_TRADES, TRADING_LOCK
 
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
@@ -257,6 +291,8 @@ def update_candle(msg):
     if symbol not in ACTIVE_SYMBOLS:
         return
 
+    prev_status = ORDER_STATE.get(symbol, {}).get("status")
+
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -264,6 +300,20 @@ def update_candle(msg):
         mode=MODE,
         log_fn=lambda m: log("ORDER", m)
     )
+
+    new_status = ORDER_STATE.get(symbol, {}).get("status")
+
+    if prev_status == "PENDING" and new_status == "EXECUTED":
+
+        EXECUTED_TRADES += 1
+        log("SYSTEM", f"TRADE_COUNT = {EXECUTED_TRADES}")
+
+        if EXECUTED_TRADES >= MAX_TRADES_PER_DAY and not TRADING_LOCK:
+
+            TRADING_LOCK = True
+            log("SYSTEM", "MAX_TRADES_PER_DAY REACHED → TRADING LOCKED")
+
+            cancel_all_pending()
 
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
@@ -321,7 +371,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# LOCAL BIAS RECEIVE
+# RECEIVE BIAS
 # ============================================================
 
 @app.route("/push-sector-bias", methods=["POST"])
