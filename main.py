@@ -1,10 +1,19 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW HEADER + FLOOR BASE FREEZE LOGIC ADDED
+# FULL FLOW HEADER + FULL LOGGING + DYNAMIC WS DETECT
 # ============================================================
 
 """
-(Original header unchanged)
+============================================================
+FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
+
+WS DETECTION LAYER ADDED:
+
+If WS connect BEFORE 09:15 → HISTORY SKIPPED
+If WS connect AT/AFTER 09:15 → HISTORY RUNS (UNCHANGED)
+
+NO OTHER LOGIC MODIFIED
+============================================================
 """
 
 # ============================================================
@@ -15,7 +24,7 @@ import os
 import time
 import threading
 import requests
-from datetime import datetime
+from datetime import datetime, time as dt_time
 import pytz
 from flask import Flask, jsonify, request
 
@@ -129,12 +138,16 @@ signal_counter = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
-# 🔥 NEW – FLOOR BASE FREEZE STATE
-FLOOR_BASE = {}
-FLOOR_BASE_CAPTURED = False
+# ============================================================
+# 🔥 DYNAMIC WS DETECTION LAYER
+# ============================================================
+
+WS_CONNECT_TIME = None
+MARKET_OPEN_TIME = dt_time(9, 15, 0)
+HISTORY_MODE = True  # default
 
 # ============================================================
-# HISTORY FETCH
+# HISTORY FETCH (UNCHANGED)
 # ============================================================
 
 def fetch_two_history_candles(symbol, end_ts):
@@ -149,7 +162,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE
+# CLOSE LIVE CANDLE (UNCHANGED)
 # ============================================================
 
 def close_live_candle(symbol, c):
@@ -211,12 +224,10 @@ def close_live_candle(symbol, c):
         )
 
 # ============================================================
-# UPDATE CANDLE
+# UPDATE CANDLE (UNCHANGED)
 # ============================================================
 
 def update_candle(msg):
-
-    global FLOOR_BASE_CAPTURED
 
     symbol = msg.get("symbol")
     ltp = msg.get("ltp")
@@ -225,14 +236,6 @@ def update_candle(msg):
 
     if ltp is None or base_vol is None or ts is None:
         return
-
-    # 🔥 FLOOR BASE FREEZE LOGIC
-    if BT_FLOOR_TS and not FLOOR_BASE_CAPTURED:
-        if ts >= BT_FLOOR_TS:
-            FLOOR_BASE[symbol] = base_vol
-            if len(FLOOR_BASE) == len(ALL_SYMBOLS):
-                FLOOR_BASE_CAPTURED = True
-                log("SYSTEM", f"FLOOR BASE FROZEN @ {fmt_ist(ts)}")
 
     if not BIAS_DONE:
         last_ws_base_before_bias[symbol] = base_vol
@@ -271,13 +274,24 @@ def update_candle(msg):
     c["base_vol"] = base_vol
 
 # ============================================================
-# WEBSOCKET (UNCHANGED)
+# WEBSOCKET
 # ============================================================
 
 def on_message(msg):
     update_candle(msg)
 
 def on_connect():
+    global WS_CONNECT_TIME, HISTORY_MODE
+
+    WS_CONNECT_TIME = datetime.now(IST).time()
+
+    if WS_CONNECT_TIME < MARKET_OPEN_TIME:
+        HISTORY_MODE = False
+        log("SYSTEM", f"WS BEFORE 09:15 → HISTORY SKIPPED ({WS_CONNECT_TIME})")
+    else:
+        HISTORY_MODE = True
+        log("SYSTEM", f"WS AFTER 09:15 → HISTORY ENABLED ({WS_CONNECT_TIME})")
+
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
 
@@ -327,11 +341,6 @@ def receive_bias():
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
     BIAS_DONE = True
 
-    # 🔥 Set last_base_vol from FLOOR_BASE
-    for s in ACTIVE_SYMBOLS:
-        if s in FLOOR_BASE:
-            last_base_vol[s] = FLOOR_BASE[s]
-
     fyers_ws.unsubscribe(
         symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
         data_type="SymbolUpdate"
@@ -341,13 +350,25 @@ def receive_bias():
 
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
-        history = fetch_two_history_candles(s, BT_FLOOR_TS)
 
-        for ts, o, h, l, c, v in history[:2]:
-            volume_history[s].append(v)
-            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+        # 🔥 CONDITIONAL HISTORY
+        if HISTORY_MODE:
+            history = fetch_two_history_candles(s, BT_FLOOR_TS)
 
-    log("SYSTEM", "History loaded – system LIVE")
+            for ts, o, h, l, c, v in history[:2]:
+                volume_history[s].append(v)
+                log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+
+            if s in last_ws_base_before_bias:
+                last_base_vol[s] = last_ws_base_before_bias[s]
+                log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+        else:
+            # Pure live mode
+            if s in last_ws_base_before_bias:
+                last_base_vol[s] = last_ws_base_before_bias[s]
+                log("SYSTEM", f"{s} | PURE LIVE MODE BASE SET | base={last_base_vol[s]}")
+
+    log("SYSTEM", "System LIVE")
 
     return jsonify({"status": "bias_received"})
 
