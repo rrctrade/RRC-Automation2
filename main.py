@@ -1,6 +1,16 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW + DAILY TRADE LIMIT CONTROL
+# FULL FLOW HEADER + FULL LOGGING + DAILY TRADE LIMIT
+# ============================================================
+
+"""
+============================================================
+FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
+============================================================
+"""
+
+# ============================================================
+# IMPORTS
 # ============================================================
 
 import os
@@ -102,7 +112,7 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
-# ✅ NEW
+# ✅ TRADE LIMIT
 MAX_TRADES_PER_DAY = int(SETTINGS.get("MAX_TRADES_PER_DAY", 999))
 
 # ============================================================
@@ -124,9 +134,24 @@ signal_counter = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
-# ✅ NEW
+# ✅ TRADE LIMIT STATE
 DAILY_EXECUTED_COUNT = 0
 TRADING_LOCKED = False
+
+# ============================================================
+# HISTORY FETCH (UNCHANGED)
+# ============================================================
+
+def fetch_two_history_candles(symbol, end_ts):
+    res = fyers.history({
+        "symbol": symbol,
+        "resolution": "5",
+        "date_format": "0",
+        "range_from": int(end_ts - 600),
+        "range_to": int(end_ts - 1),
+        "cont_flag": "1"
+    })
+    return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
 # TRADE LIMIT FUNCTIONS
@@ -159,12 +184,10 @@ def cancel_all_pending_orders():
             )
 
 # ============================================================
-# CLOSE LIVE CANDLE
+# CLOSE LIVE CANDLE (ORIGINAL LOGIC + LOCK CHECK)
 # ============================================================
 
 def close_live_candle(symbol, c):
-
-    global TRADING_LOCKED
 
     prev_base = last_base_vol.get(symbol)
     if prev_base is None:
@@ -191,7 +214,7 @@ def close_live_candle(symbol, c):
     if not is_lowest:
         return
 
-    # ✅ BLOCK NEW SIGNALS IF LIMIT REACHED
+    # ✅ BLOCK NEW SIGNALS IF LIMIT HIT
     if TRADING_LOCKED:
         return
 
@@ -230,7 +253,7 @@ def close_live_candle(symbol, c):
         )
 
 # ============================================================
-# UPDATE CANDLE
+# UPDATE CANDLE (WITH EXECUTION TRACK)
 # ============================================================
 
 def update_candle(msg):
@@ -250,7 +273,7 @@ def update_candle(msg):
     if symbol not in ACTIVE_SYMBOLS:
         return
 
-    # ✅ ENTRY TRACK WRAPPER
+    # ✅ TRACK EXECUTION
     prev_state = ORDER_STATE.get(symbol, {}).get("status")
 
     handle_ltp_event(
