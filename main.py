@@ -1,16 +1,30 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
 # FULL FLOW HEADER + FULL LOGGING + DYNAMIC WS DETECT
+# 4TH CANDLE SIGNAL RULE ENFORCED
 # ============================================================
 
 """
 ============================================================
 FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
 
-WS DETECTION LAYER ADDED:
+WS DETECTION LAYER:
 
 If WS connect BEFORE 09:15 → HISTORY SKIPPED
-If WS connect AT/AFTER 09:15 → HISTORY RUNS (UNCHANGED)
+If WS connect AT/AFTER 09:15 → HISTORY RUNS
+
+SIGNAL RULE:
+History Mode:
+C1 (history)
+C2 (history)
+LIVE3 (volume only)
+LIVE4 onward → VOCHK
+
+Pure Live Mode:
+LIVE1
+LIVE2
+LIVE3
+LIVE4 onward → VOCHK
 
 NO OTHER LOGIC MODIFIED
 ============================================================
@@ -139,15 +153,15 @@ BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
 # ============================================================
-# 🔥 DYNAMIC WS DETECTION LAYER
+# WS DETECTION
 # ============================================================
 
 WS_CONNECT_TIME = None
 MARKET_OPEN_TIME = dt_time(9, 15, 0)
-HISTORY_MODE = True  # default
+HISTORY_MODE = True
 
 # ============================================================
-# HISTORY FETCH (UNCHANGED)
+# HISTORY FETCH
 # ============================================================
 
 def fetch_two_history_candles(symbol, end_ts):
@@ -162,7 +176,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ============================================================
-# CLOSE LIVE CANDLE (UNCHANGED)
+# CLOSE LIVE CANDLE
 # ============================================================
 
 def close_live_candle(symbol, c):
@@ -174,9 +188,14 @@ def close_live_candle(symbol, c):
     candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
-    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = prev_min is not None and candle_vol < prev_min
-    volume_history.setdefault(symbol, []).append(candle_vol)
+    # 🔒 4TH CANDLE RULE
+    if len(volume_history.get(symbol, [])) < 3:
+        volume_history.setdefault(symbol, []).append(candle_vol)
+        return
+
+    prev_min = min(volume_history[symbol])
+    is_lowest = candle_vol < prev_min
+    volume_history[symbol].append(candle_vol)
 
     color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
     bias = STOCK_BIAS_MAP.get(symbol, "")
@@ -224,7 +243,7 @@ def close_live_candle(symbol, c):
         )
 
 # ============================================================
-# UPDATE CANDLE (UNCHANGED)
+# UPDATE CANDLE
 # ============================================================
 
 def update_candle(msg):
@@ -351,7 +370,6 @@ def receive_bias():
     for s in ACTIVE_SYMBOLS:
         volume_history.setdefault(s, [])
 
-        # 🔥 CONDITIONAL HISTORY
         if HISTORY_MODE:
             history = fetch_two_history_candles(s, BT_FLOOR_TS)
 
@@ -363,7 +381,6 @@ def receive_bias():
                 last_base_vol[s] = last_ws_base_before_bias[s]
                 log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
         else:
-            # Pure live mode
             if s in last_ws_base_before_bias:
                 last_base_vol[s] = last_ws_base_before_bias[s]
                 log("SYSTEM", f"{s} | PURE LIVE MODE BASE SET | base={last_base_vol[s]}")
