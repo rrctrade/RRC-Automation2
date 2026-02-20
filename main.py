@@ -1,15 +1,48 @@
 # ============================================================
-# RajanTradeAutomation – FINAL ENGINE (STABLE + FIXED)
-# ARCHITECTURE PRESERVED
-# 4TH CANDLE RULE STRICTLY ENFORCED
-# FULL LOGGING ENABLED
+# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
+# FULL FLOW HEADER + FULL LOGGING + PENDING FIX
+# ============================================================
+
+"""
+============================================================
+FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
+============================================================
+
+PHASE 1 – DEPLOY
+1) ENV load
+2) Logs cleared
+3) Settings fetch
+4) WebSocket connect (ALL symbols)
+
+PHASE 2 – LOCAL BIAS WAIT
+5) Local system waits till BIAS_TIME
+6) Local pushes strong_sectors + selected_stocks
+7) Render receives bias
+8) Create STOCK_BIAS_MAP
+9) Filter ACTIVE_SYMBOLS
+10) Unsubscribe non-active symbols
+
+PHASE 3 – HISTORY LOAD
+11) Load 2 history candles
+12) Set LIVE3 base volume
+13) System LIVE
+
+PHASE 4 – SIGNAL LOGIC
+
+Strategy starts from 4th candle close (LIVE4).
+
+============================================================
+"""
+
+# ============================================================
+# IMPORTS
 # ============================================================
 
 import os
 import time
 import threading
 import requests
-from datetime import datetime, time as dt_time
+from datetime import datetime
 import pytz
 from flask import Flask, jsonify, request
 
@@ -81,7 +114,7 @@ def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – STABLE FIXED VERSION")
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE")
 
 # ============================================================
 # SETTINGS
@@ -116,15 +149,12 @@ BIAS_DONE = False
 candles = {}
 last_base_vol = {}
 last_ws_base_before_bias = {}
+
 volume_history = {}
 signal_counter = {}
 
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
-
-WS_CONNECT_TIME = None
-MARKET_OPEN_TIME = dt_time(9, 15, 0)
-HISTORY_MODE = True
 
 # ============================================================
 # HISTORY FETCH
@@ -149,58 +179,51 @@ def close_live_candle(symbol, c):
 
     prev_base = last_base_vol.get(symbol)
     if prev_base is None:
-        last_base_vol[symbol] = c["base_vol"]
         return
 
     candle_vol = c["base_vol"] - prev_base
     last_base_vol[symbol] = c["base_vol"]
 
-    volume_history.setdefault(symbol, [])
+    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
+    is_lowest = prev_min is not None and candle_vol < prev_min
+    volume_history.setdefault(symbol, []).append(candle_vol)
 
-    candle_no = len(volume_history[symbol]) + 1
+    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
+    bias = STOCK_BIAS_MAP.get(symbol, "")
 
-    log("CLOSE",
-        f"{symbol} | CANDLE#{candle_no} | "
-        f"O={c['open']} H={c['high']} L={c['low']} C={c['close']} | "
-        f"V={round(candle_vol,2)}")
+    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
 
-    # FIRST 3 CANDLES → REFERENCE ONLY
-    if candle_no <= 3:
-        volume_history[symbol].append(candle_vol)
-        log("REF", f"{symbol} | CANDLE#{candle_no} | REF VOL ADDED")
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
+
+    # 🔥 STRATEGY STARTS FROM 4TH CANDLE (LIVE4)
+    if offset < 1:
         return
-
-    prev_min = min(volume_history[symbol])
-    is_lowest = candle_vol < prev_min
-
-    log("VOLCHK",
-        f"{symbol} | CANDLE#{candle_no} | "
-        f"VOL={round(candle_vol,2)} | PREV_MIN={round(prev_min,2)} | "
-        f"LOWEST={is_lowest}")
-
-    volume_history[symbol].append(candle_vol)
 
     if not is_lowest:
         return
 
-    log("SYSTEM", f"{symbol} | NEW LOWEST VOLUME FOUND")
+    state = ORDER_STATE.get(symbol)
+    status = state.get("status") if state else None
 
-    color = (
-        "RED" if c["open"] > c["close"]
-        else "GREEN" if c["open"] < c["close"]
-        else "DOJI"
-    )
+    if status == "PENDING":
+        handle_signal_event(
+            fyers=fyers,
+            symbol=symbol,
+            side=None,
+            high=None,
+            low=None,
+            per_trade_risk=PER_TRADE_RISK,
+            mode=MODE,
+            signal_no=None,
+            log_fn=lambda m: log("ORDER", m)
+        )
 
-    bias = STOCK_BIAS_MAP.get(symbol, "")
-
-    if (bias == "B" and color == "RED") or \
-       (bias == "S" and color == "GREEN"):
+    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
 
         sc = signal_counter.get(symbol, 0) + 1
         signal_counter[symbol] = sc
         side = "BUY" if bias == "B" else "SELL"
-
-        log("SYSTEM", f"{symbol} | SIGNAL CONFIRMED | CANDLE#{candle_no}")
 
         handle_signal_event(
             fyers=fyers,
@@ -272,17 +295,6 @@ def on_message(msg):
     update_candle(msg)
 
 def on_connect():
-    global WS_CONNECT_TIME, HISTORY_MODE
-
-    WS_CONNECT_TIME = datetime.now(IST).time()
-
-    if WS_CONNECT_TIME < MARKET_OPEN_TIME:
-        HISTORY_MODE = False
-        log("SYSTEM", f"WS BEFORE 09:15 → PURE LIVE MODE")
-    else:
-        HISTORY_MODE = True
-        log("SYSTEM", f"WS AFTER 09:15 → HISTORY MODE")
-
     log("SYSTEM", "WS CONNECTED")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
 
@@ -299,7 +311,7 @@ def start_ws():
 threading.Thread(target=start_ws, daemon=True).start()
 
 # ============================================================
-# RECEIVE BIAS
+# LOCAL BIAS RECEIVE
 # ============================================================
 
 @app.route("/push-sector-bias", methods=["POST"])
@@ -314,28 +326,56 @@ def receive_bias():
     bias_ts = int(datetime.now(UTC).timestamp())
     BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
 
-    log("BIAS", f"Strong sectors received = {len(strong)}")
+    log("BIAS", "Bias received from LOCAL")
+
+    filtered = (
+        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
+        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
+    )
+
+    for s in filtered:
+        log(
+            "BIAS",
+            f"{s['bias']} - {s['sector']} - "
+            f"ADVANCES {s['up_pct']}% DECLINES {s['down_pct']}%"
+        )
 
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
     for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
-        log("SECTOR", f"{s['sector']} | BUY | UP={s['up_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
 
     for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
-        log("SECTOR", f"{s['sector']} | SELL | DOWN={s['down_pct']}%")
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
 
     ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
-
-    log("SYSTEM", f"ACTIVE_SYMBOLS = {len(ACTIVE_SYMBOLS)}")
-
     BIAS_DONE = True
+
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
+        data_type="SymbolUpdate"
+    )
+
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+    for s in ACTIVE_SYMBOLS:
+        volume_history.setdefault(s, [])
+        history = fetch_two_history_candles(s, BT_FLOOR_TS)
+
+        for ts, o, h, l, c, v in history[:2]:
+            volume_history[s].append(v)
+            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+
+    log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
 
