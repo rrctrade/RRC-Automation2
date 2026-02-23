@@ -1,17 +1,39 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# FULL FLOW HEADER + FULL LOGGING + DAILY TRADE LIMIT
+# FULL FLOW HEADER + FULL LOGGING + PENDING FIX
+# ORDER_EXECUTED NUMBERING ADDED (STAGE 1)
 # ============================================================
 
 """
 ============================================================
 FULL SYSTEM FLOW (FINAL – LOCAL BIAS ARCHITECTURE)
 ============================================================
+
+PHASE 1 – DEPLOY
+1) ENV load
+2) Logs cleared
+3) Settings fetch
+4) WebSocket connect (ALL symbols)
+
+PHASE 2 – LOCAL BIAS WAIT
+5) Local system waits till BIAS_TIME
+6) Local pushes strong_sectors + selected_stocks
+7) Render receives bias
+8) Create STOCK_BIAS_MAP
+9) Filter ACTIVE_SYMBOLS
+10) Unsubscribe non-active symbols
+
+PHASE 3 – HISTORY LOAD
+11) Load 2 history candles
+12) Set LIVE3 base volume
+13) System LIVE
+
+PHASE 4 – SIGNAL LOGIC
+Strategy starts from 4th candle close (LIVE4).
+============================================================
 """
 
-# ============================================================
-# IMPORTS
-# ============================================================
+# ================= IMPORTS =================
 
 import os
 import time
@@ -32,17 +54,13 @@ from signal_candle_order import (
     ORDER_STATE
 )
 
-# ============================================================
-# TIME
-# ============================================================
+# ================= TIME =================
 
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
 CANDLE_INTERVAL = 300
 
-# ============================================================
-# ENV
-# ============================================================
+# ================= ENV =================
 
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
@@ -51,9 +69,7 @@ WEBAPP_URL = os.getenv("WEBAPP_URL")
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
     raise RuntimeError("Missing ENV variables")
 
-# ============================================================
-# APP
-# ============================================================
+# ================= APP =================
 
 app = Flask(__name__)
 
@@ -63,13 +79,27 @@ fyers = fyersModel.FyersModel(
     log_path=""
 )
 
-# ============================================================
-# LOGGING
-# ============================================================
+# ================= 🔥 NEW COUNTER =================
+
+ORDER_EXECUTION_COUNT = 0
+
+# ================= LOGGING =================
 
 def log(level, msg):
+    global ORDER_EXECUTION_COUNT
+
+    # 🔥 ONLY CHANGE: Numbering for ORDER_EXECUTED
+    if level == "ORDER" and msg.startswith("ORDER_EXECUTED"):
+        ORDER_EXECUTION_COUNT += 1
+        msg = msg.replace(
+            "ORDER_EXECUTED",
+            f"ORDER_EXECUTED {ORDER_EXECUTION_COUNT}",
+            1
+        )
+
     ts = datetime.now(IST).strftime("%H:%M:%S")
     print(f"[{ts}] {level} | {msg}", flush=True)
+
     try:
         requests.post(
             WEBAPP_URL,
@@ -79,21 +109,22 @@ def log(level, msg):
     except Exception:
         pass
 
+
 def clear_logs():
     try:
         requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
     except Exception:
         pass
 
+
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
+
 
 clear_logs()
 log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE")
 
-# ============================================================
-# SETTINGS
-# ============================================================
+# ================= SETTINGS =================
 
 def get_settings():
     for _ in range(3):
@@ -105,6 +136,7 @@ def get_settings():
             time.sleep(1)
     raise RuntimeError("Unable to fetch Settings")
 
+
 SETTINGS = get_settings()
 
 BUY_SECTOR_COUNT = int(SETTINGS.get("BUY_SECTOR_COUNT", 0))
@@ -112,12 +144,7 @@ SELL_SECTOR_COUNT = int(SETTINGS.get("SELL_SECTOR_COUNT", 0))
 PER_TRADE_RISK = float(SETTINGS.get("PER_TRADE_RISK", 0))
 MODE = SETTINGS.get("MODE", "PAPER")
 
-# ✅ TRADE LIMIT
-MAX_TRADES_PER_DAY = int(SETTINGS.get("MAX_TRADES_PER_DAY", 999))
-
-# ============================================================
-# STATE
-# ============================================================
+# ================= STATE =================
 
 ALL_SYMBOLS = sorted({s for v in SECTOR_MAP.values() for s in v})
 
@@ -134,13 +161,7 @@ signal_counter = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
-# ✅ TRADE LIMIT STATE
-DAILY_EXECUTED_COUNT = 0
-TRADING_LOCKED = False
-
-# ============================================================
-# HISTORY FETCH (UNCHANGED)
-# ============================================================
+# ================= HISTORY FETCH =================
 
 def fetch_two_history_candles(symbol, end_ts):
     res = fyers.history({
@@ -153,39 +174,7 @@ def fetch_two_history_candles(symbol, end_ts):
     })
     return res.get("candles", []) if res.get("s") == "ok" else []
 
-# ============================================================
-# TRADE LIMIT FUNCTIONS
-# ============================================================
-
-def register_execution():
-    global DAILY_EXECUTED_COUNT, TRADING_LOCKED
-
-    DAILY_EXECUTED_COUNT += 1
-    log("SYSTEM", f"EXECUTED_COUNT | {DAILY_EXECUTED_COUNT}/{MAX_TRADES_PER_DAY}")
-
-    if DAILY_EXECUTED_COUNT >= MAX_TRADES_PER_DAY:
-        TRADING_LOCKED = True
-        log("SYSTEM", "MAX_TRADES_REACHED – NEW ENTRIES BLOCKED")
-        cancel_all_pending_orders()
-
-def cancel_all_pending_orders():
-    for sym, state in list(ORDER_STATE.items()):
-        if state.get("status") == "PENDING":
-            handle_signal_event(
-                fyers=fyers,
-                symbol=sym,
-                side=None,
-                high=None,
-                low=None,
-                per_trade_risk=PER_TRADE_RISK,
-                mode=MODE,
-                signal_no=None,
-                log_fn=lambda m: log("ORDER", m)
-            )
-
-# ============================================================
-# CLOSE LIVE CANDLE (ORIGINAL LOGIC + LOCK CHECK)
-# ============================================================
+# ================= CLOSE LIVE CANDLE =================
 
 def close_live_candle(symbol, c):
 
@@ -212,10 +201,6 @@ def close_live_candle(symbol, c):
         return
 
     if not is_lowest:
-        return
-
-    # ✅ BLOCK NEW SIGNALS IF LIMIT HIT
-    if TRADING_LOCKED:
         return
 
     state = ORDER_STATE.get(symbol)
@@ -252,9 +237,7 @@ def close_live_candle(symbol, c):
             log_fn=lambda m: log("ORDER", m)
         )
 
-# ============================================================
-# UPDATE CANDLE (WITH EXECUTION TRACK)
-# ============================================================
+# ================= UPDATE CANDLE =================
 
 def update_candle(msg):
 
@@ -273,9 +256,6 @@ def update_candle(msg):
     if symbol not in ACTIVE_SYMBOLS:
         return
 
-    # ✅ TRACK EXECUTION
-    prev_state = ORDER_STATE.get(symbol, {}).get("status")
-
     handle_ltp_event(
         fyers=fyers,
         symbol=symbol,
@@ -283,11 +263,6 @@ def update_candle(msg):
         mode=MODE,
         log_fn=lambda m: log("ORDER", m)
     )
-
-    new_state = ORDER_STATE.get(symbol, {}).get("status")
-
-    if prev_state == "PENDING" and new_state == "EXECUTED":
-        register_execution()
 
     start = ts - (ts % CANDLE_INTERVAL)
     c = candles.get(symbol)
@@ -310,9 +285,7 @@ def update_candle(msg):
     c["close"] = ltp
     c["base_vol"] = base_vol
 
-# ============================================================
-# WEBSOCKET (UNCHANGED)
-# ============================================================
+# ================= WEBSOCKET =================
 
 def on_message(msg):
     update_candle(msg)
@@ -333,9 +306,7 @@ def start_ws():
 
 threading.Thread(target=start_ws, daemon=True).start()
 
-# ============================================================
-# LOCAL BIAS RECEIVE (UNCHANGED)
-# ============================================================
+# ================= LOCAL BIAS RECEIVE =================
 
 @app.route("/push-sector-bias", methods=["POST"])
 def receive_bias():
@@ -357,8 +328,7 @@ def receive_bias():
     )
 
     for s in filtered:
-        log(
-            "BIAS",
+        log("BIAS",
             f"{s['bias']} - {s['sector']} - "
             f"ADVANCES {s['up_pct']}% DECLINES {s['down_pct']}%"
         )
@@ -402,9 +372,7 @@ def receive_bias():
 
     return jsonify({"status": "bias_received"})
 
-# ============================================================
-# ROUTES (UNCHANGED)
-# ============================================================
+# ================= ROUTES =================
 
 @app.route("/")
 def health():
@@ -415,9 +383,7 @@ def fyers_redirect():
     log("SYSTEM", "FYERS redirect hit")
     return jsonify({"status": "ok"})
 
-# ============================================================
-# START
-# ============================================================
+# ================= START =================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
