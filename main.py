@@ -1,7 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
+# RajanTradeAutomation – FINAL ENGINE
+# LOCAL BIAS MODE + PURE LIVE MODE (SURGICAL ADD)
 # STAGE 1 + STAGE 2 HARD LOCK
-# FULL LOGGING RESTORED – PRODUCTION STABLE
 # ============================================================
 
 import os
@@ -31,6 +31,16 @@ CANDLE_INTERVAL = 300
 
 def fmt_ist(ts):
     return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
+
+# ================= ENGINE MODE =================
+
+PURE_LIVE_MODE = False
+
+def detect_engine_mode():
+    global PURE_LIVE_MODE
+    now_ist = datetime.now(IST)
+    market_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    PURE_LIVE_MODE = now_ist < market_start
 
 # ================= ENV =================
 
@@ -137,7 +147,7 @@ def clear_logs():
         pass
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE + HARD LOCK")
+log("SYSTEM", "FINAL ENGINE START – AUTO MODE")
 
 # ================= HARD LOCK CLEANUP =================
 
@@ -187,6 +197,7 @@ def fetch_two_history_candles(symbol, end_ts):
     return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ================= CLOSE LIVE CANDLE =================
+# (UNCHANGED FROM YOUR STABLE VERSION)
 
 def close_live_candle(symbol, c):
 
@@ -253,6 +264,7 @@ def close_live_candle(symbol, c):
         )
 
 # ================= UPDATE CANDLE =================
+# 🔥 ONLY SURGICAL CHANGE HERE
 
 def update_candle(msg):
 
@@ -264,11 +276,15 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
+    # 🔥 ORIGINAL LOGIC PRESERVED
     if not BIAS_DONE:
-        last_ws_base_before_bias[symbol] = base_vol
-        return
+        if not PURE_LIVE_MODE:
+            last_ws_base_before_bias[symbol] = base_vol
+            return
+        # PURE LIVE → continue building candles
 
-    if symbol not in ACTIVE_SYMBOLS:
+    # 🔒 ORIGINAL FILTER PRESERVED
+    if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
         return
 
     handle_ltp_event(
@@ -306,7 +322,9 @@ def on_message(msg):
     update_candle(msg)
 
 def on_connect():
-    log("SYSTEM", "WS CONNECTED")
+    detect_engine_mode()
+    mode_text = "PURE LIVE MODE" if PURE_LIVE_MODE else "HISTORY MODE"
+    log("SYSTEM", f"WS CONNECTED – {mode_text}")
     fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
 
 def start_ws():
@@ -321,7 +339,7 @@ def start_ws():
 
 threading.Thread(target=start_ws, daemon=True).start()
 
-# ================= LOCAL BIAS RECEIVE =================
+# ================= BIAS RECEIVE =================
 
 @app.route("/push-sector-bias", methods=["POST"])
 def receive_bias():
@@ -360,19 +378,23 @@ def receive_bias():
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
-    for s in ACTIVE_SYMBOLS:
-        volume_history.setdefault(s, [])
-        history = fetch_two_history_candles(s, BT_FLOOR_TS)
+    # 🔥 HISTORY FETCH ONLY IN HISTORY MODE
+    if not PURE_LIVE_MODE:
+        for s in ACTIVE_SYMBOLS:
+            volume_history.setdefault(s, [])
+            history = fetch_two_history_candles(s, BT_FLOOR_TS)
 
-        for ts, o, h, l, c, v in history[:2]:
-            volume_history[s].append(v)
-            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
+            for ts, o, h, l, c, v in history[:2]:
+                volume_history[s].append(v)
+                log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
-        if s in last_ws_base_before_bias:
-            last_base_vol[s] = last_ws_base_before_bias[s]
-            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+            if s in last_ws_base_before_bias:
+                last_base_vol[s] = last_ws_base_before_bias[s]
+                log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
+    else:
+        log("SYSTEM", "PURE LIVE MODE – History skipped")
 
-    log("SYSTEM", "History loaded – system LIVE")
+    log("SYSTEM", "System ACTIVE")
 
     return jsonify({"status": "bias_received"})
 
