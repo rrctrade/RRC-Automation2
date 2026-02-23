@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE
-# LOCAL BIAS MODE + PURE LIVE MODE (SURGICAL ADD)
+# LOCAL BIAS MODE + PURE LIVE MODE (FINAL PRODUCTION SAFE)
 # STAGE 1 + STAGE 2 HARD LOCK
 # ============================================================
 
@@ -100,6 +100,9 @@ last_ws_base_before_bias = {}
 volume_history = {}
 signal_counter = {}
 
+# 🔥 NEW: PURE LIVE BUFFER
+pre_bias_candle_buffer = {}
+
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
@@ -147,124 +150,9 @@ def clear_logs():
         pass
 
 clear_logs()
-log("SYSTEM", "FINAL ENGINE START – AUTO MODE")
-
-# ================= HARD LOCK CLEANUP =================
-
-def hard_lock_cleanup():
-    global ACTIVE_SYMBOLS
-
-    active_trade_symbols = {
-        sym for sym, st in ORDER_STATE.items()
-        if st.get("status") in ("EXECUTED", "SL_PLACED")
-    }
-
-    unsubscribe_symbols = list(set(ACTIVE_SYMBOLS) - active_trade_symbols)
-
-    if unsubscribe_symbols:
-        try:
-            fyers_ws.unsubscribe(
-                symbols=unsubscribe_symbols,
-                data_type="SymbolUpdate"
-            )
-            log("SYSTEM", f"UNSUBSCRIBED_SYMBOLS={len(unsubscribe_symbols)}")
-        except Exception as e:
-            log("SYSTEM", f"UNSUBSCRIBE_FAIL | {e}")
-
-    ACTIVE_SYMBOLS = active_trade_symbols
-
-    for sym, st in list(ORDER_STATE.items()):
-        if st.get("status") == "PENDING":
-            try:
-                if MODE == "LIVE" and st.get("signal_order_id"):
-                    fyers.cancel_order({"id": st["signal_order_id"]})
-                log("ORDER", f"ORDER_CANCEL | {sym} | SIGNAL")
-            except Exception as e:
-                log("ORDER", f"SIGNAL_CANCEL_FAIL | {sym} | {e}")
-            ORDER_STATE.pop(sym, None)
-
-# ================= HISTORY FETCH =================
-
-def fetch_two_history_candles(symbol, end_ts):
-    res = fyers.history({
-        "symbol": symbol,
-        "resolution": "5",
-        "date_format": "0",
-        "range_from": int(end_ts - 600),
-        "range_to": int(end_ts - 1),
-        "cont_flag": "1"
-    })
-    return res.get("candles", []) if res.get("s") == "ok" else []
-
-# ================= CLOSE LIVE CANDLE =================
-# (UNCHANGED FROM YOUR STABLE VERSION)
-
-def close_live_candle(symbol, c):
-
-    if TRADING_LOCKED:
-        return
-
-    prev_base = last_base_vol.get(symbol)
-    if prev_base is None:
-        return
-
-    candle_vol = c["base_vol"] - prev_base
-    last_base_vol[symbol] = c["base_vol"]
-
-    prev_min = min(volume_history[symbol]) if volume_history.get(symbol) else None
-    is_lowest = prev_min is not None and candle_vol < prev_min
-    volume_history.setdefault(symbol, []).append(candle_vol)
-
-    color = "RED" if c["open"] > c["close"] else "GREEN" if c["open"] < c["close"] else "DOJI"
-    bias = STOCK_BIAS_MAP.get(symbol, "")
-
-    offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
-    label = f"LIVE{offset + 3}"
-
-    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
-
-    if offset < 1:
-        return
-
-    if not is_lowest:
-        return
-
-    state = ORDER_STATE.get(symbol)
-    status = state.get("status") if state else None
-
-    if status == "PENDING":
-        handle_signal_event(
-            fyers=fyers,
-            symbol=symbol,
-            side=None,
-            high=None,
-            low=None,
-            per_trade_risk=PER_TRADE_RISK,
-            mode=MODE,
-            signal_no=None,
-            log_fn=lambda m: log("ORDER", m)
-        )
-
-    if (bias == "B" and color == "RED") or (bias == "S" and color == "GREEN"):
-
-        sc = signal_counter.get(symbol, 0) + 1
-        signal_counter[symbol] = sc
-        side = "BUY" if bias == "B" else "SELL"
-
-        handle_signal_event(
-            fyers=fyers,
-            symbol=symbol,
-            side=side,
-            high=c["high"],
-            low=c["low"],
-            per_trade_risk=PER_TRADE_RISK,
-            mode=MODE,
-            signal_no=sc,
-            log_fn=lambda m: log("ORDER", m)
-        )
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE + HARD LOCK")
 
 # ================= UPDATE CANDLE =================
-# 🔥 ONLY SURGICAL CHANGE HERE
 
 def update_candle(msg):
 
@@ -276,15 +164,45 @@ def update_candle(msg):
     if ltp is None or base_vol is None or ts is None:
         return
 
-    # 🔥 ORIGINAL LOGIC PRESERVED
-    if not BIAS_DONE:
-        if not PURE_LIVE_MODE:
-            last_ws_base_before_bias[symbol] = base_vol
-            return
-        # PURE LIVE → continue building candles
+    # 🔵 PURE LIVE MODE – build buffer before bias
+    if not BIAS_DONE and PURE_LIVE_MODE:
 
-    # 🔒 ORIGINAL FILTER PRESERVED
-    if BIAS_DONE and symbol not in ACTIVE_SYMBOLS:
+        start = ts - (ts % CANDLE_INTERVAL)
+        c = candles.get(symbol)
+
+        if c is None or c["start"] != start:
+            if c:
+                # candle closed → store in buffer
+                prev_base = last_base_vol.get(symbol)
+                if prev_base is not None:
+                    vol = c["base_vol"] - prev_base
+                    pre_bias_candle_buffer.setdefault(symbol, []).append(
+                        (c["start"], vol)
+                    )
+                last_base_vol[symbol] = c["base_vol"]
+
+            candles[symbol] = {
+                "start": start,
+                "open": ltp,
+                "high": ltp,
+                "low": ltp,
+                "close": ltp,
+                "base_vol": base_vol
+            }
+            return
+
+        c["high"] = max(c["high"], ltp)
+        c["low"] = min(c["low"], ltp)
+        c["close"] = ltp
+        c["base_vol"] = base_vol
+        return
+
+    # 🔵 HISTORY MODE ORIGINAL
+    if not BIAS_DONE:
+        last_ws_base_before_bias[symbol] = base_vol
+        return
+
+    if symbol not in ACTIVE_SYMBOLS:
         return
 
     handle_ltp_event(
@@ -378,8 +296,18 @@ def receive_bias():
 
     log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
 
-    # 🔥 HISTORY FETCH ONLY IN HISTORY MODE
-    if not PURE_LIVE_MODE:
+    # 🔥 PURE LIVE: print LIVE1,2,3 volumes
+    if PURE_LIVE_MODE:
+        for s in ACTIVE_SYMBOLS:
+            for ts_start, vol in pre_bias_candle_buffer.get(s, [])[:3]:
+                label_time = fmt_ist(ts_start)
+                log("HISTORY", f"{s} | {label_time} | V={vol}")
+                volume_history.setdefault(s, []).append(vol)
+
+        log("SYSTEM", "PURE LIVE – Pre-bias candles loaded")
+
+    else:
+        # ORIGINAL HISTORY MODE (UNCHANGED)
         for s in ACTIVE_SYMBOLS:
             volume_history.setdefault(s, [])
             history = fetch_two_history_candles(s, BT_FLOOR_TS)
@@ -391,10 +319,8 @@ def receive_bias():
             if s in last_ws_base_before_bias:
                 last_base_vol[s] = last_ws_base_before_bias[s]
                 log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
-    else:
-        log("SYSTEM", "PURE LIVE MODE – History skipped")
 
-    log("SYSTEM", "System ACTIVE")
+        log("SYSTEM", "History loaded – system LIVE")
 
     return jsonify({"status": "bias_received"})
 
