@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
-# STAGE 1 + STAGE 2 (HARD MAX_TRADES LOCK)
-# FULL CORRECT VERSION – ALL ROUTES INCLUDED
+# STAGE 1 + STAGE 2 HARD LOCK
+# FULL LOGGING RESTORED – PRODUCTION STABLE
 # ============================================================
 
 import os
@@ -28,6 +28,9 @@ from signal_candle_order import (
 IST = pytz.timezone("Asia/Kolkata")
 UTC = pytz.utc
 CANDLE_INTERVAL = 300
+
+def fmt_ist(ts):
+    return datetime.fromtimestamp(int(ts), UTC).astimezone(IST).strftime("%H:%M:%S")
 
 # ================= ENV =================
 
@@ -141,7 +144,6 @@ log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE + HARD LOCK")
 def hard_lock_cleanup():
     global ACTIVE_SYMBOLS
 
-    # ---- STEP 1: Keep only active trades subscribed ----
     active_trade_symbols = {
         sym for sym, st in ORDER_STATE.items()
         if st.get("status") in ("EXECUTED", "SL_PLACED")
@@ -161,7 +163,6 @@ def hard_lock_cleanup():
 
     ACTIVE_SYMBOLS = active_trade_symbols
 
-    # ---- STEP 2: Cancel all pending ----
     for sym, st in list(ORDER_STATE.items()):
         if st.get("status") == "PENDING":
             try:
@@ -170,7 +171,6 @@ def hard_lock_cleanup():
                 log("ORDER", f"ORDER_CANCEL | {sym} | SIGNAL")
             except Exception as e:
                 log("ORDER", f"SIGNAL_CANCEL_FAIL | {sym} | {e}")
-
             ORDER_STATE.pop(sym, None)
 
 # ================= HISTORY FETCH =================
@@ -208,6 +208,10 @@ def close_live_candle(symbol, c):
     bias = STOCK_BIAS_MAP.get(symbol, "")
 
     offset = (c["start"] - BT_FLOOR_TS) // CANDLE_INTERVAL
+    label = f"LIVE{offset + 3}"
+
+    log("VOLCHK", f"{symbol} | {label} | vol={round(candle_vol,2)} | is_lowest={is_lowest} | {color} {bias}")
+
     if offset < 1:
         return
 
@@ -333,11 +337,6 @@ def receive_bias():
 
     log("BIAS", "Bias received from LOCAL")
 
-    filtered = (
-        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
-        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
-    )
-
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
@@ -367,9 +366,11 @@ def receive_bias():
 
         for ts, o, h, l, c, v in history[:2]:
             volume_history[s].append(v)
+            log("HISTORY", f"{s} | {fmt_ist(ts)} | V={v}")
 
         if s in last_ws_base_before_bias:
             last_base_vol[s] = last_ws_base_before_bias[s]
+            log("SYSTEM", f"{s} | LIVE3 BASE SET | base={last_base_vol[s]}")
 
     log("SYSTEM", "History loaded – system LIVE")
 
