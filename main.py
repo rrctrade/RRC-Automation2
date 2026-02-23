@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL ENGINE (LOCAL BIAS MODE)
 # STAGE 1 + STAGE 2 (HARD MAX_TRADES LOCK)
+# FULL CORRECT VERSION – ALL ROUTES INCLUDED
 # ============================================================
 
 import os
@@ -53,50 +54,6 @@ ORDER_EXECUTION_COUNT = 0
 DAILY_EXECUTED_COUNT = 0
 TRADING_LOCKED = False
 
-# ================= LOGGING =================
-
-def log(level, msg):
-    global ORDER_EXECUTION_COUNT, DAILY_EXECUTED_COUNT, TRADING_LOCKED
-
-    if level == "ORDER" and msg.startswith("ORDER_EXECUTED"):
-        ORDER_EXECUTION_COUNT += 1
-        DAILY_EXECUTED_COUNT += 1
-
-        msg = msg.replace(
-            "ORDER_EXECUTED",
-            f"ORDER_EXECUTED {ORDER_EXECUTION_COUNT}",
-            1
-        )
-
-        # ===== HARD LOCK TRIGGER =====
-        if MAX_TRADES_PER_DAY > 0 and DAILY_EXECUTED_COUNT >= MAX_TRADES_PER_DAY and not TRADING_LOCKED:
-            TRADING_LOCKED = True
-            log("SYSTEM", "MAX_TRADES_REACHED – HARD LOCK ACTIVATED")
-            hard_lock_cleanup()
-
-    ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {level} | {msg}", flush=True)
-
-    try:
-        requests.post(
-            WEBAPP_URL,
-            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
-            timeout=3
-        )
-    except Exception:
-        pass
-
-
-def clear_logs():
-    try:
-        requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
-    except Exception:
-        pass
-
-
-clear_logs()
-log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE + HARD LOCK")
-
 # ================= SETTINGS =================
 
 def get_settings():
@@ -108,7 +65,6 @@ def get_settings():
         except Exception:
             time.sleep(1)
     raise RuntimeError("Unable to fetch Settings")
-
 
 SETTINGS = get_settings()
 
@@ -134,12 +90,58 @@ signal_counter = {}
 BT_FLOOR_TS = None
 STOCK_BIAS_MAP = {}
 
+# ================= LOGGING =================
+
+def log(level, msg):
+    global ORDER_EXECUTION_COUNT, DAILY_EXECUTED_COUNT, TRADING_LOCKED
+
+    if level == "ORDER" and msg.startswith("ORDER_EXECUTED"):
+
+        ORDER_EXECUTION_COUNT += 1
+        DAILY_EXECUTED_COUNT += 1
+
+        msg = msg.replace(
+            "ORDER_EXECUTED",
+            f"ORDER_EXECUTED {ORDER_EXECUTION_COUNT}",
+            1
+        )
+
+        if (
+            MAX_TRADES_PER_DAY > 0
+            and DAILY_EXECUTED_COUNT >= MAX_TRADES_PER_DAY
+            and not TRADING_LOCKED
+        ):
+            TRADING_LOCKED = True
+            log("SYSTEM", "MAX_TRADES_REACHED – HARD LOCK ACTIVATED")
+            hard_lock_cleanup()
+
+    ts = datetime.now(IST).strftime("%H:%M:%S")
+    print(f"[{ts}] {level} | {msg}", flush=True)
+
+    try:
+        requests.post(
+            WEBAPP_URL,
+            json={"action": "pushLog", "payload": {"level": level, "message": msg}},
+            timeout=3
+        )
+    except Exception:
+        pass
+
+def clear_logs():
+    try:
+        requests.post(WEBAPP_URL, json={"action": "clearLogs"}, timeout=5)
+    except Exception:
+        pass
+
+clear_logs()
+log("SYSTEM", "FINAL ENGINE START – LOCAL BIAS MODE + HARD LOCK")
+
 # ================= HARD LOCK CLEANUP =================
 
 def hard_lock_cleanup():
     global ACTIVE_SYMBOLS
 
-    # ---- Step 1: Keep only active trades subscribed ----
+    # ---- STEP 1: Keep only active trades subscribed ----
     active_trade_symbols = {
         sym for sym, st in ORDER_STATE.items()
         if st.get("status") in ("EXECUTED", "SL_PLACED")
@@ -159,7 +161,7 @@ def hard_lock_cleanup():
 
     ACTIVE_SYMBOLS = active_trade_symbols
 
-    # ---- Step 2: Cancel all pending orders ----
+    # ---- STEP 2: Cancel all pending ----
     for sym, st in list(ORDER_STATE.items()):
         if st.get("status") == "PENDING":
             try:
@@ -170,6 +172,19 @@ def hard_lock_cleanup():
                 log("ORDER", f"SIGNAL_CANCEL_FAIL | {sym} | {e}")
 
             ORDER_STATE.pop(sym, None)
+
+# ================= HISTORY FETCH =================
+
+def fetch_two_history_candles(symbol, end_ts):
+    res = fyers.history({
+        "symbol": symbol,
+        "resolution": "5",
+        "date_format": "0",
+        "range_from": int(end_ts - 600),
+        "range_to": int(end_ts - 1),
+        "cont_flag": "1"
+    })
+    return res.get("candles", []) if res.get("s") == "ok" else []
 
 # ================= CLOSE LIVE CANDLE =================
 
@@ -280,6 +295,85 @@ def update_candle(msg):
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["base_vol"] = base_vol
+
+# ================= WEBSOCKET =================
+
+def on_message(msg):
+    update_candle(msg)
+
+def on_connect():
+    log("SYSTEM", "WS CONNECTED")
+    fyers_ws.subscribe(symbols=ALL_SYMBOLS, data_type="SymbolUpdate")
+
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+# ================= LOCAL BIAS RECEIVE =================
+
+@app.route("/push-sector-bias", methods=["POST"])
+def receive_bias():
+
+    global BT_FLOOR_TS, STOCK_BIAS_MAP, ACTIVE_SYMBOLS, BIAS_DONE
+
+    data = request.get_json(force=True)
+    strong = data.get("strong_sectors", [])
+    selected = data.get("selected_stocks", [])
+
+    bias_ts = int(datetime.now(UTC).timestamp())
+    BT_FLOOR_TS = bias_ts - (bias_ts % CANDLE_INTERVAL)
+
+    log("BIAS", "Bias received from LOCAL")
+
+    filtered = (
+        [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT] +
+        [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]
+    )
+
+    STOCK_BIAS_MAP.clear()
+    ACTIVE_SYMBOLS.clear()
+
+    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "B"
+
+    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
+        key = SECTOR_LIST.get(s["sector"])
+        for sym in SECTOR_MAP.get(key, []):
+            STOCK_BIAS_MAP[sym] = "S"
+
+    ACTIVE_SYMBOLS = set(selected) & set(STOCK_BIAS_MAP.keys())
+    BIAS_DONE = True
+
+    fyers_ws.unsubscribe(
+        symbols=list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS),
+        data_type="SymbolUpdate"
+    )
+
+    log("SYSTEM", f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
+
+    for s in ACTIVE_SYMBOLS:
+        volume_history.setdefault(s, [])
+        history = fetch_two_history_candles(s, BT_FLOOR_TS)
+
+        for ts, o, h, l, c, v in history[:2]:
+            volume_history[s].append(v)
+
+        if s in last_ws_base_before_bias:
+            last_base_vol[s] = last_ws_base_before_bias[s]
+
+    log("SYSTEM", "History loaded – system LIVE")
+
+    return jsonify({"status": "bias_received"})
 
 # ================= ROUTES =================
 
