@@ -1,7 +1,7 @@
 # ============================================================
 # signal_candle_order.py
-# RR 1.5 ONLY → TRAILING SL (ENTRY ± 200)
-# FINAL VERSION – WITH ORDER_EXECUTED LOG FIX
+# RR 2.5 (DYNAMIC) → TRAILING SL (LOCK 200)
+# FINAL VERSION – DYNAMIC RR (PER_TRADE_RISK BASED)
 # Compatible with main.py (LOCAL BIAS MODE)
 # ============================================================
 
@@ -12,7 +12,7 @@ from math import floor
 # ------------------------------------------------------------
 ORDER_STATE = {}
 
-RR_PROFIT = 750
+RR_MULTIPLIER = 2.5
 LOCK_PROFIT = 200
 
 
@@ -86,6 +86,7 @@ def place_signal_order(
         "signal_order_id": signal_order_id,
         "trail_done": False,
         "entry_logged": False,
+        "risk": per_trade_risk,   # 🔥 Dynamic RR support
     }
 
 
@@ -102,9 +103,7 @@ def handle_signal_event(**kwargs):
 
     state = ORDER_STATE.get(symbol)
 
-    # --------------------------------------------------------
     # CANCEL-ONLY MODE
-    # --------------------------------------------------------
     if side is None:
         if state and state.get("status") == "PENDING":
             if mode == "LIVE" and state.get("signal_order_id"):
@@ -120,15 +119,11 @@ def handle_signal_event(**kwargs):
             ORDER_STATE.pop(symbol, None)
         return
 
-    # --------------------------------------------------------
-    # Ignore if trade already active or closed
-    # --------------------------------------------------------
+    # Ignore if trade active
     if state and state.get("status") in ("EXECUTED", "SL_PLACED", "SL_HIT"):
         return
 
-    # --------------------------------------------------------
-    # Cancel old pending before new signal
-    # --------------------------------------------------------
+    # Cancel old pending
     if state and state.get("status") == "PENDING":
         if mode == "LIVE" and state.get("signal_order_id"):
             try:
@@ -142,9 +137,6 @@ def handle_signal_event(**kwargs):
 
         ORDER_STATE.pop(symbol, None)
 
-    # --------------------------------------------------------
-    # Place fresh signal
-    # --------------------------------------------------------
     place_signal_order(**kwargs)
 
 
@@ -198,7 +190,7 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
     side = state["side"]
     qty = state["qty"]
 
-    # ---------------- ENTRY EXEC ----------------
+    # ENTRY EXEC
     if state["status"] == "PENDING":
 
         if (side == "BUY" and ltp >= state["trigger"]) or \
@@ -230,15 +222,17 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
 
         return
 
-    # ---------------- PROFIT ----------------
+    # PROFIT CALC
     entry = state["entry_price"]
     profit = (
         (ltp - entry) * qty if side == "BUY"
         else (entry - ltp) * qty
     )
 
-    # ---------------- RR TRAILING ----------------
-    if profit >= RR_PROFIT and not state["trail_done"]:
+    # DYNAMIC RR TRAILING (2.5R)
+    rr_profit = state["risk"] * RR_MULTIPLIER
+
+    if profit >= rr_profit and not state["trail_done"]:
 
         new_sl = (
             entry + (LOCK_PROFIT / qty)
@@ -251,10 +245,10 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
             state["trail_done"] = True
 
             log_fn(
-                f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=1.5 | LOCK=200"
+                f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=2.5 | LOCK=200"
             )
 
-    # ---------------- SL HIT ----------------
+    # SL HIT
     if state["status"] == "SL_PLACED":
         if (side == "BUY" and ltp <= state["sl_price"]) or \
            (side == "SELL" and ltp >= state["sl_price"]):
