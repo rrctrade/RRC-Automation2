@@ -1,7 +1,7 @@
 # ============================================================
 # signal_candle_order.py
-# RR 2.5 (DYNAMIC) → TRAILING SL (LOCK 200)
-# PRODUCTION VERSION – CLEAN CLOSE STATE
+# RR 2.5 DYNAMIC → TRAILING SL (ENTRY ± 200)
+# ORIGINAL STRUCTURE PRESERVED + PROPER GUARD
 # LIVE + PAPER COMPATIBLE
 # ============================================================
 
@@ -85,7 +85,7 @@ def place_signal_order(
         "sl_order_id": None,
         "signal_order_id": signal_order_id,
         "trail_done": False,
-        "risk": per_trade_risk,
+        "risk": per_trade_risk,   # 🔥 dynamic RR support
     }
 
 
@@ -102,7 +102,7 @@ def handle_signal_event(**kwargs):
 
     state = ORDER_STATE.get(symbol)
 
-    # CANCEL ONLY MODE
+    # CANCEL-ONLY MODE
     if side is None:
         if state and state.get("status") == "PENDING":
             if mode == "LIVE" and state.get("signal_order_id"):
@@ -118,15 +118,11 @@ def handle_signal_event(**kwargs):
             ORDER_STATE.pop(symbol, None)
         return
 
-    # If trade already active or closed → ignore
-    if state and state.get("status") in ("EXECUTED", "SL_PLACED"):
+    # Ignore if trade already active or closed
+    if state and state.get("status") in ("EXECUTED", "SL_PLACED", "SL_HIT"):
         return
 
-    # If previously closed → remove stale state
-    if state and state.get("status") in ("SL_HIT",):
-        ORDER_STATE.pop(symbol, None)
-
-    # Cancel old pending
+    # Cancel old pending before new signal
     if state and state.get("status") == "PENDING":
         if mode == "LIVE" and state.get("signal_order_id"):
             try:
@@ -190,14 +186,11 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
     if not state:
         return
 
-    status = state["status"]
     side = state["side"]
     qty = state["qty"]
 
-    # --------------------------------------------------------
-    # ENTRY EXECUTION
-    # --------------------------------------------------------
-    if status == "PENDING":
+    # ---------------- ENTRY EXEC ----------------
+    if state["status"] == "PENDING":
 
         if (side == "BUY" and ltp >= state["trigger"]) or \
            (side == "SELL" and ltp <= state["trigger"]):
@@ -228,17 +221,8 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
 
         return
 
-    # --------------------------------------------------------
-    # IGNORE IF TRADE CLOSED
-    # --------------------------------------------------------
-    if status == "SL_HIT":
-        return
-
-    # --------------------------------------------------------
-    # PROFIT CALCULATION
-    # --------------------------------------------------------
+    # ---------------- PROFIT ----------------
     entry = state["entry_price"]
-
     profit = (
         (ltp - entry) * qty if side == "BUY"
         else (entry - ltp) * qty
@@ -246,10 +230,10 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
 
     rr_profit = state["risk"] * RR_MULTIPLIER
 
-    # --------------------------------------------------------
-    # TRAILING
-    # --------------------------------------------------------
-    if status == "SL_PLACED" and profit >= rr_profit and not state["trail_done"]:
+    # ---------------- RR TRAILING (GUARDED) ----------------
+    if state["status"] == "SL_PLACED" and \
+       profit >= rr_profit and \
+       not state["trail_done"]:
 
         new_sl = (
             entry + (LOCK_PROFIT / qty)
@@ -265,19 +249,20 @@ def handle_ltp_event(*, fyers, symbol, ltp, mode, log_fn):
                 f"MODIFIED_SL | {symbol} | SL={round(new_sl,2)} | RR=2.5 | LOCK=200"
             )
 
-    # --------------------------------------------------------
-    # SL HIT
-    # --------------------------------------------------------
-    if status == "SL_PLACED":
-
+    # ---------------- SL HIT ----------------
+    if state["status"] == "SL_PLACED":
         if (side == "BUY" and ltp <= state["sl_price"]) or \
            (side == "SELL" and ltp >= state["sl_price"]):
+
+            state["status"] = "SL_HIT"
 
             log_fn(
                 f"SL_EXECUTED | {symbol} | SL={round(state['sl_price'],2)}"
             )
 
-            state["status"] = "SL_HIT"
 
-            # 🔥 PRODUCTION CLEANUP
-            ORDER_STATE.pop(symbol, None)
+__all__ = [
+    "handle_signal_event",
+    "handle_ltp_event",
+    "ORDER_STATE",
+]
