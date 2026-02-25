@@ -337,6 +337,16 @@ def receive_bias():
 
     log("BIAS", "Bias received from LOCAL")
 
+    # ===== NEW SECTOR ADV/DEC LOG =====
+    for s in strong:
+        log(
+            "BIAS",
+            f"{s['sector']} - {s['bias']} "
+            f"ADVANCES - {s.get('up_pct', 0)}% "
+            f"DECLINES - {s.get('down_pct', 0)}%"
+        )
+    # ==================================
+
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
