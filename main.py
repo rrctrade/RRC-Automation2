@@ -340,12 +340,34 @@ def receive_bias():
     STOCK_BIAS_MAP.clear()
     ACTIVE_SYMBOLS.clear()
 
-    for s in [x for x in strong if x["bias"] == "BUY"][:BUY_SECTOR_COUNT]:
+    # ===== BUY SECTOR RANKING =====
+    buy_sectors = sorted(
+        [x for x in strong if x["bias"] == "BUY"],
+        key=lambda x: x["up_pct"],
+        reverse=True
+    )
+
+    log("BIAS", "BUY RANKING → " + ", ".join(
+        [f"{s['sector']}({s['up_pct']}%)" for s in buy_sectors]
+    ))
+
+    for s in buy_sectors[:BUY_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "B"
 
-    for s in [x for x in strong if x["bias"] == "SELL"][:SELL_SECTOR_COUNT]:
+    # ===== SELL SECTOR RANKING =====
+    sell_sectors = sorted(
+        [x for x in strong if x["bias"] == "SELL"],
+        key=lambda x: x["down_pct"],
+        reverse=True
+    )
+
+    log("BIAS", "SELL RANKING → " + ", ".join(
+        [f"{s['sector']}({s['down_pct']}%)" for s in sell_sectors]
+    ))
+
+    for s in sell_sectors[:SELL_SECTOR_COUNT]:
         key = SECTOR_LIST.get(s["sector"])
         for sym in SECTOR_MAP.get(key, []):
             STOCK_BIAS_MAP[sym] = "S"
