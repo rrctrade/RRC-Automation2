@@ -1,260 +1,312 @@
 # ============================================================
-# RajanTradeAutomation – ENGINE
-# WS + Perfect 5m Candle Engine
-# Local Bias Compatible
-# Boundary Mismatch FIXED
+# sector_mapping.py
+# COMPLETE Sector → Stock Mapping (FINAL LOCKED)
+# Source: User provided lists (NO ADD / NO REMOVE)
 # ============================================================
 
-import os
-import threading
-import requests
-from datetime import datetime
-import pytz
-
-from flask import Flask, jsonify, request
-from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws
-
-
-# ================= TIME =================
-
-IST = pytz.timezone("Asia/Kolkata")
-UTC = pytz.utc
-CANDLE_INTERVAL = 300
-
-def fmt_ist(ts):
-    return datetime.fromtimestamp(ts, UTC).astimezone(IST).strftime("%H:%M")
-
-# ================= ENV =================
-
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL")
-
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
-    raise RuntimeError("Missing ENV variables")
-
-# ================= SETTINGS =================
-
-def get_settings():
-
-    for _ in range(3):
-        try:
-            r = requests.post(
-                WEBAPP_URL,
-                json={"action": "getSettings"},
-                timeout=5
-            )
-            if r.ok:
-                return r.json().get("settings", {})
-        except:
-            pass
-
-    raise RuntimeError("Unable to fetch settings")
-
-SETTINGS = get_settings()
-
-NIFTY_ADV_THRESHOLD = float(
-    SETTINGS.get("NIFTY_ADVANCE_THRESHOLD", 60)
-)
-
-NIFTY_DEC_THRESHOLD = float(
-    SETTINGS.get("NIFTY_DECLINE_THRESHOLD", 60)
-)
-
-# ================= APP =================
-
-app = Flask(__name__)
-
-# ================= FYERS =================
-
-fyers = fyersModel.FyersModel(
-    client_id=FYERS_CLIENT_ID,
-    token=FYERS_ACCESS_TOKEN,
-    log_path=""
-)
-
-# ================= SYMBOLS =================
-
-ALL_SYMBOLS = sorted({
-    s for v in SECTOR_MAP.values() for s in v
-})
-
-# ================= STATE =================
-
-candles = {}
-last_base_vol = {}
-
-ACTIVE_SYMBOLS = set()
-BIAS_DONE = False
-BIAS_ANCHOR = None
-
-# ================= LOG =================
-
-def log(msg):
-
-    ts = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-# ================= CLOSE CANDLE =================
-
-def close_candle(symbol, c):
-
-    prev_base = last_base_vol.get(symbol)
-
-    if prev_base is None:
-        last_base_vol[symbol] = c["base_vol"]
-        return
-
-    vol = c["base_vol"] - prev_base
-    last_base_vol[symbol] = c["base_vol"]
-
-    log(
-        f"CANDLE | {symbol} | {fmt_ist(c['start'])} | "
-        f"O={c['open']} H={c['high']} "
-        f"L={c['low']} C={c['close']} V={vol}"
-    )
-
-# ================= UPDATE CANDLE =================
-
-def update_candle(msg):
-
-    symbol = msg.get("symbol")
-    ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
-    ts = msg.get("exch_feed_time")
-
-    if not symbol or ltp is None or vol is None or ts is None:
-        return
-
-    start = ts - (ts % CANDLE_INTERVAL)
-
-    c = candles.get(symbol)
-
-    if c is None or c["start"] != start:
-
-        if c:
-            close_candle(symbol, c)
-
-        candles[symbol] = {
-            "start": start,
-            "open": ltp,
-            "high": ltp,
-            "low": ltp,
-            "close": ltp,
-            "base_vol": vol
-        }
-
-        return
-
-    c["high"] = max(c["high"], ltp)
-    c["low"] = min(c["low"], ltp)
-    c["close"] = ltp
-    c["base_vol"] = vol
-
-# ================= WEBSOCKET =================
-
-def on_message(msg):
-
-    update_candle(msg)
-
-def on_connect():
-
-    log("WS CONNECTED")
-
-    fyers_ws.subscribe(
-        symbols=ALL_SYMBOLS,
-        data_type="SymbolUpdate"
-    )
-
-    log(f"SUBSCRIBED_SYMBOLS={len(ALL_SYMBOLS)}")
-
-def start_ws():
-
-    global fyers_ws
-
-    fyers_ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_message,
-        on_connect=on_connect,
-        reconnect=True
-    )
-
-    fyers_ws.connect()
-
-threading.Thread(
-    target=start_ws,
-    daemon=True
-).start()
-
-# ================= BIAS RECEIVE =================
-
-@app.route("/push-sector-bias", methods=["POST"])
-def receive_bias():
-
-    global ACTIVE_SYMBOLS
-    global BIAS_DONE
-    global BIAS_ANCHOR
-
-    data = request.get_json(force=True)
-
-    bias = data.get("bias")
-    symbols = data.get("active_symbols", [])
-
-    log(f"BIAS RECEIVED = {bias}")
-
-    ACTIVE_SYMBOLS = set(symbols)
-
-    # -------- BOUNDARY FIX --------
-    now_ts = int(datetime.now(UTC).timestamp())
-    BIAS_ANCHOR = now_ts - (now_ts % CANDLE_INTERVAL)
-
-    log(f"BIAS_ANCHOR = {fmt_ist(BIAS_ANCHOR)}")
-
-    unsubscribe = list(set(ALL_SYMBOLS) - ACTIVE_SYMBOLS)
-
-    if unsubscribe:
-
-        try:
-
-            fyers_ws.unsubscribe(
-                symbols=unsubscribe,
-                data_type="SymbolUpdate"
-            )
-
-            log(f"UNSUBSCRIBED_SYMBOLS={len(unsubscribe)}")
-
-        except Exception as e:
-
-            log(f"UNSUBSCRIBE_FAIL | {e}")
-
-    log(f"ACTIVE_SYMBOLS={len(ACTIVE_SYMBOLS)}")
-
-    BIAS_DONE = True
-
-    return jsonify({"status": "bias_received"})
-
-# ================= ROUTES =================
-
-@app.route("/")
-def health():
-
-    return jsonify({"status": "ok"})
-
-@app.route("/fyers-redirect")
-def fyers_redirect():
-
-    log("FYERS REDIRECT HIT")
-
-    return jsonify({"status": "ok"})
-
-# ================= START =================
-
-if __name__ == "__main__":
-
-    log("ENGINE START")
-
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000))
-    )
+SECTOR_MAP = {
+
+    # ===================== NIFTY AUTO ======================
+    "AUTO": [
+        "NSE:UNOMINDA-EQ",
+        "NSE:TMPV-EQ",
+        "NSE:ASHOKLEY-EQ",
+        "NSE:BAJAJ-AUTO-EQ",
+        "NSE:MARUTI-EQ",
+        "NSE:EICHERMOT-EQ",
+        "NSE:TVSMOTOR-EQ",
+        "NSE:BHARATFORG-EQ",
+        "NSE:EXIDEIND-EQ",
+        "NSE:BOSCHLTD-EQ",
+        "NSE:M&M-EQ",
+        "NSE:MOTHERSON-EQ",
+        "NSE:SONACOMS-EQ",
+        "NSE:HEROMOTOCO-EQ",
+        "NSE:TIINDIA-EQ"
+    ],
+
+    # ================= NIFTY FINANCIAL SERVICES =================
+    "FINANCIAL_SERVICES": [
+        "NSE:SHRIRAMFIN-EQ",
+        "NSE:BSE-EQ",
+        "NSE:PFC-EQ",
+        "NSE:RECLTD-EQ",
+        "NSE:ICICIBANK-EQ",
+        "NSE:JIOFIN-EQ",
+        "NSE:BAJAJFINSV-EQ",
+        "NSE:LICHSGFIN-EQ",
+        "NSE:AXISBANK-EQ",
+        "NSE:HDFCBANK-EQ",
+        "NSE:ICICIPRULI-EQ",
+        "NSE:SBICARD-EQ",
+        "NSE:MUTHOOTFIN-EQ",
+        "NSE:BAJFINANCE-EQ",
+        "NSE:ICICIGI-EQ",
+        "NSE:SBILIFE-EQ",
+        "NSE:KOTAKBANK-EQ",
+        "NSE:SBIN-EQ",
+        "NSE:HDFCLIFE-EQ",
+        "NSE:CHOLAFIN-EQ"
+    ],
+
+    # ===================== NIFTY FMCG ======================
+    "FMCG": [
+        "NSE:VBL-EQ",
+        "NSE:RADICO-EQ",
+        "NSE:UNITDSPR-EQ",
+        "NSE:UBL-EQ",
+        "NSE:NESTLEIND-EQ",
+        "NSE:EMAMILTD-EQ",
+        "NSE:ITC-EQ",
+        "NSE:HINDUNILVR-EQ",
+        "NSE:DABUR-EQ",
+        "NSE:GODREJCP-EQ",
+        "NSE:COLPAL-EQ",
+        "NSE:BRITANNIA-EQ",
+        "NSE:MARICO-EQ",
+        "NSE:TATACONSUM-EQ",
+        "NSE:PATANJALI-EQ"
+    ],
+
+    # ===================== NIFTY IT ======================
+    "IT": [
+        "NSE:PERSISTENT-EQ",
+        "NSE:WIPRO-EQ",
+        "NSE:INFY-EQ",
+        "NSE:TECHM-EQ",
+        "NSE:HCLTECH-EQ",
+        "NSE:TCS-EQ",
+        "NSE:COFORGE-EQ",
+        "NSE:OFSS-EQ",
+        "NSE:LTIM-EQ",
+        "NSE:MPHASIS-EQ"
+    ],
+
+    # ===================== NIFTY MEDIA ======================
+    "MEDIA": [
+        "NSE:SUNTV-EQ",
+        "NSE:ZEEL-EQ",
+        "NSE:NETWORK18-EQ",
+        "NSE:HATHWAY-EQ",
+        "NSE:PFOCUS-EQ",
+        "NSE:NAZARA-EQ",
+        "NSE:DBCORP-EQ",
+        "NSE:SAREGAMA-EQ",
+        "NSE:TIPSMUSIC-EQ",
+        "NSE:PVRINOX-EQ"
+    ],
+
+    # ===================== NIFTY METAL ======================
+    "METAL": [
+        "NSE:NATIONALUM-EQ",
+        "NSE:LLOYDSME-EQ",
+        "NSE:HINDCOPPER-EQ",
+        "NSE:WELCORP-EQ",
+        "NSE:SAIL-EQ",
+        "NSE:NMDC-EQ",
+        "NSE:HINDZINC-EQ",
+        "NSE:APLAPOLLO-EQ",
+        "NSE:JSWSTEEL-EQ",
+        "NSE:HINDALCO-EQ",
+        "NSE:ADANIENT-EQ",
+        "NSE:JINDALSTEL-EQ",
+        "NSE:VEDL-EQ",
+        "NSE:TATASTEEL-EQ",
+        "NSE:JSL-EQ"
+    ],
+
+    # ===================== NIFTY PHARMA ======================
+    "PHARMA": [
+        "NSE:PPLPHARMA-EQ",
+        "NSE:WOCKPHARMA-EQ",
+        "NSE:AJANTPHARM-EQ",
+        "NSE:GLENMARK-EQ",
+        "NSE:LAURUSLABS-EQ",
+        "NSE:SUNPHARMA-EQ",
+        "NSE:ALKEM-EQ",
+        "NSE:GLAND-EQ",
+        "NSE:MANKIND-EQ",
+        "NSE:IPCALAB-EQ",
+        "NSE:DIVISLAB-EQ",
+        "NSE:DRREDDY-EQ",
+        "NSE:LUPIN-EQ",
+        "NSE:TORNTPHARM-EQ",
+        "NSE:BIOCON-EQ",
+        "NSE:JBCHEPHARM-EQ",
+        "NSE:AUROPHARMA-EQ",
+        "NSE:ZYDUSLIFE-EQ",
+        "NSE:ABBOTINDIA-EQ",
+        "NSE:CIPLA-EQ"
+    ],
+
+    # ===================== NIFTY PSU BANK ======================
+    "PSU_BANK": [
+        "NSE:PSB-EQ",
+        "NSE:PNB-EQ",
+        "NSE:UCOBANK-EQ",
+        "NSE:CENTRALBK-EQ",
+        "NSE:CANBK-EQ",
+        "NSE:INDIANB-EQ",
+        "NSE:MAHABANK-EQ",
+        "NSE:BANKBARODA-EQ",
+        "NSE:IOB-EQ",
+        "NSE:BANKINDIA-EQ",
+        "NSE:SBIN-EQ",
+        "NSE:UNIONBANK-EQ"
+    ],
+
+    # ===================== NIFTY PRIVATE BANK ======================
+    "PRIVATE_BANK": [
+        "NSE:INDUSINDBK-EQ",
+        "NSE:RBLBANK-EQ",
+        "NSE:ICICIBANK-EQ",
+        "NSE:IDFCFIRSTB-EQ",
+        "NSE:FEDERALBNK-EQ",
+        "NSE:YESBANK-EQ",
+        "NSE:AXISBANK-EQ",
+        "NSE:HDFCBANK-EQ",
+        "NSE:KOTAKBANK-EQ",
+        "NSE:BANDHANBNK-EQ"
+    ],
+
+    # ===================== NIFTY REALTY ======================
+    "REALTY": [
+        "NSE:ANANTRAJ-EQ",
+        "NSE:SOBHA-EQ",
+        "NSE:PHOENIXLTD-EQ",
+        "NSE:BRIGADE-EQ",
+        "NSE:LODHA-EQ",
+        "NSE:DLF-EQ",
+        "NSE:OBEROIRLTY-EQ",
+        "NSE:SIGNATURE-EQ",
+        "NSE:GODREJPROP-EQ",
+        "NSE:PRESTIGE-EQ"
+    ],
+
+    # ===================== NIFTY CONSUMER DURABLES ======================
+    "CONSUMER_DURABLES": [
+        "NSE:WHIRLPOOL-EQ",
+        "NSE:CROMPTON-EQ",
+        "NSE:VGUARD-EQ",
+        "NSE:HAVELLS-EQ",
+        "NSE:CERA-EQ",
+        "NSE:CENTURYPLY-EQ",
+        "NSE:VOLTAS-EQ",
+        "NSE:AMBER-EQ",
+        "NSE:KALYANKJIL-EQ",
+        "NSE:TITAN-EQ",
+        "NSE:BATAINDIA-EQ",
+        "NSE:KAJARIACER-EQ",
+        "NSE:PGEL-EQ",
+        "NSE:BLUESTARCO-EQ",
+        "NSE:DIXON-EQ"
+    ],
+
+    # ===================== NIFTY OIL & GAS ======================
+    "OIL_GAS": [
+        "NSE:GSPL-EQ",
+        "NSE:BPCL-EQ",
+        "NSE:GAIL-EQ",
+        "NSE:HINDPETRO-EQ",
+        "NSE:MGL-EQ",
+        "NSE:PETRONET-EQ",
+        "NSE:CASTROLIND-EQ",
+        "NSE:RELIANCE-EQ",
+        "NSE:ONGC-EQ",
+        "NSE:IGL-EQ",
+        "NSE:IOC-EQ",
+        "NSE:GUJGASLTD-EQ",
+        "NSE:OIL-EQ"
+    ],
+
+    # ===================== NIFTY FIN SERVICES EX BANK ======================
+    "FIN_SERVICES_EX_BANK": [
+        "NSE:MCX-EQ",
+        "NSE:SHRIRAMFIN-EQ",
+        "NSE:BSE-EQ",
+        "NSE:IRFC-EQ",
+        "NSE:ANGELONE-EQ",
+        "NSE:360ONE-EQ",
+        "NSE:PFC-EQ",
+        "NSE:CDSL-EQ",
+        "NSE:RECLTD-EQ",
+        "NSE:LTF-EQ",
+        "NSE:JIOFIN-EQ",
+        "NSE:PNBHOUSING-EQ",
+        "NSE:MFSL-EQ",
+        "NSE:CAMS-EQ",
+        "NSE:BAJAJFINSV-EQ",
+        "NSE:LICI-EQ",
+        "NSE:LICHSGFIN-EQ",
+        "NSE:ICICIPRULI-EQ",
+        "NSE:SBICARD-EQ",
+        "NSE:MUTHOOTFIN-EQ",
+        "NSE:BAJFINANCE-EQ",
+        "NSE:ICICIGI-EQ",
+        "NSE:SBILIFE-EQ",
+        "NSE:IEX-EQ",
+        "NSE:HDFCAMC-EQ",
+        "NSE:POLICYBZR-EQ",
+        "NSE:PAYTM-EQ",
+        "NSE:ABCAPITAL-EQ",
+        "NSE:HDFCLIFE-EQ",
+        "NSE:CHOLAFIN-EQ"
+    ],
+
+    # ===================== NIFTY CHEMICALS ======================
+    "CHEMICALS": [
+        "NSE:SOLARINDS-EQ",
+        "NSE:CHAMBLFERT-EQ",
+        "NSE:UPL-EQ",
+        "NSE:SUMICHEM-EQ",
+        "NSE:DEEPAKFERT-EQ",
+        "NSE:BAYERCROP-EQ",
+        "NSE:AARTIIND-EQ",
+        "NSE:HSCL-EQ",
+        "NSE:TATACHEM-EQ",
+        "NSE:DEEPAKNTR-EQ",
+        "NSE:NAVINFLUOR-EQ",
+        "NSE:COROMANDEL-EQ",
+        "NSE:PIIND-EQ",
+        "NSE:PCBL-EQ",
+        "NSE:LINDEINDIA-EQ",
+        "NSE:PIDILITIND-EQ",
+        "NSE:FLUOROCHEM-EQ",
+        "NSE:SRF-EQ"
+    ],
+
+    # ===================== NIFTY 50 ======================
+    "NIFTY50": [
+        "NSE:TRENT-EQ","NSE:SHRIRAMFIN-EQ","NSE:WIPRO-EQ","NSE:INFY-EQ",
+        "NSE:BHARTIARTL-EQ","NSE:TECHM-EQ","NSE:TMPV-EQ","NSE:BAJAJ-AUTO-EQ",
+        "NSE:MARUTI-EQ","NSE:SUNPHARMA-EQ","NSE:BEL-EQ","NSE:HCLTECH-EQ",
+        "NSE:JSWSTEEL-EQ","NSE:HINDALCO-EQ","NSE:TCS-EQ","NSE:EICHERMOT-EQ",
+        "NSE:ICICIBANK-EQ","NSE:ADANIENT-EQ","NSE:NESTLEIND-EQ",
+        "NSE:RELIANCE-EQ","NSE:JIOFIN-EQ","NSE:ADANIPORTS-EQ",
+        "NSE:ONGC-EQ","NSE:APOLLOHOSP-EQ","NSE:POWERGRID-EQ","NSE:ITC-EQ",
+        "NSE:ETERNAL-EQ","NSE:BAJAJFINSV-EQ","NSE:DRREDDY-EQ",
+        "NSE:COALINDIA-EQ","NSE:NTPC-EQ","NSE:ULTRACEMCO-EQ",
+        "NSE:AXISBANK-EQ","NSE:M&M-EQ","NSE:HINDUNILVR-EQ",
+        "NSE:TATASTEEL-EQ","NSE:HDFCBANK-EQ","NSE:ASIANPAINT-EQ",
+        "NSE:LT-EQ","NSE:BAJFINANCE-EQ","NSE:TITAN-EQ","NSE:MAXHEALTH-EQ",
+        "NSE:SBILIFE-EQ","NSE:INDIGO-EQ","NSE:GRASIM-EQ","NSE:CIPLA-EQ",
+        "NSE:KOTAKBANK-EQ","NSE:SBIN-EQ","NSE:TATACONSUM-EQ",
+        "NSE:HDFCLIFE-EQ"
+    ],
+
+    # ===================== NIFTY BANK ======================
+    "BANK": [
+        "NSE:PNB-EQ",
+        "NSE:INDUSINDBK-EQ",
+        "NSE:ICICIBANK-EQ",
+        "NSE:CANBK-EQ",
+        "NSE:IDFCFIRSTB-EQ",
+        "NSE:FEDERALBNK-EQ",
+        "NSE:BANKBARODA-EQ",
+        "NSE:AXISBANK-EQ",
+        "NSE:HDFCBANK-EQ",
+        "NSE:AUBANK-EQ",
+        "NSE:KOTAKBANK-EQ",
+        "NSE:SBIN-EQ"
+    ]
+}
