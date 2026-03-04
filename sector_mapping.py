@@ -15,7 +15,6 @@ from flask import Flask, jsonify, request
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
-from sector_mapping import SECTOR_MAP
 
 # ================= TIME =================
 
