@@ -230,12 +230,12 @@ def start_ws():
 
     global fyers_ws
 
-    fyers_ws = data_ws.FyersDataSocket(
-    access_token=f"{FYERS_CLIENT_ID}:{FYERS_ACCESS_TOKEN}",
-    on_message=on_message,
-    on_connect=on_connect,
-    reconnect=True
-    )
+        fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_connect=on_connect,
+        reconnect=True
+        )
 
     fyers_ws.connect()
 
