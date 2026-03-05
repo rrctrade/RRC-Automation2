@@ -1,7 +1,7 @@
 # ============================================================
 # sector_engine.py
-# Sector Bias + Stock Selection
-# FINAL STABLE PATCH (pChange STRING FIX ONLY)
+# Sector Bias + Stock Selection + Ranking
+# FINAL PRODUCTION VERSION
 # ============================================================
 
 import requests
@@ -9,8 +9,9 @@ import time
 from datetime import datetime
 from sector_mapping import SECTOR_MAP
 
+
 # ------------------------------------------------------------
-# NSE SECTOR NAMES (AS-IS, NO CHANGE)
+# NSE SECTOR NAMES
 # ------------------------------------------------------------
 SECTOR_LIST = {
     "NIFTY AUTO": "AUTO",
@@ -31,8 +32,9 @@ SECTOR_LIST = {
     "NIFTY 50": "NIFTY50",
 }
 
+
 # ------------------------------------------------------------
-# NSE SESSION (UNCHANGED)
+# NSE SESSION
 # ------------------------------------------------------------
 NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -43,35 +45,45 @@ NSE_HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(NSE_HEADERS)
 
+
 def warmup():
     try:
         SESSION.get("https://www.nseindia.com", timeout=5)
     except Exception:
         pass
 
+
 # ------------------------------------------------------------
-# FETCH SECTOR STOCKS (🔥 FIX HERE 🔥)
+# FETCH SECTOR DATA
 # ------------------------------------------------------------
 def fetch_sector_stocks(sector_name):
+
     url = "https://www.nseindia.com/api/equity-stockIndices"
 
     try:
-        res = SESSION.get(url, params={"index": sector_name}, timeout=10)
+
+        res = SESSION.get(
+            url,
+            params={"index": sector_name},
+            timeout=10
+        )
+
         data = res.json()
+
     except Exception:
+
         return {}
 
     stocks = {}
+
     for row in data.get("data", []):
+
         sym = row.get("symbol")
         chg = row.get("pChange")
 
         if not sym or sym.upper() == sector_name.upper():
             continue
 
-        # ✅ FINAL FIX:
-        # NSE now sends pChange as STRING
-        # Old isinstance(int/float) was killing everything
         try:
             stocks[sym.upper()] = float(chg)
         except (TypeError, ValueError):
@@ -79,25 +91,26 @@ def fetch_sector_stocks(sector_name):
 
     return stocks
 
+
 # ------------------------------------------------------------
-# PUBLIC INTERFACE (NO LOGIC CHANGE)
+# MAIN SECTOR ENGINE
 # ------------------------------------------------------------
 def run_sector_bias():
-    """
-    🔒 PUBLIC INTERFACE FUNCTION
-    main.py will call ONLY this.
-    """
+
     strong_sectors = []
     selected_stocks = set()
 
     warmup()
 
     for nse_sector, map_key in SECTOR_LIST.items():
+
         stocks = fetch_sector_stocks(nse_sector)
+
         if not stocks:
             continue
 
         total = len(stocks)
+
         up = sum(1 for v in stocks.values() if v > 0)
         down = sum(1 for v in stocks.values() if v < 0)
 
@@ -105,8 +118,10 @@ def run_sector_bias():
         down_pct = (down / total) * 100 if total else 0
 
         bias = None
+
         if up_pct >= 60:
             bias = "BUY"
+
         elif down_pct >= 60:
             bias = "SELL"
 
@@ -120,16 +135,43 @@ def run_sector_bias():
             "down_pct": round(down_pct, 2),
         })
 
+        # ----------------------------------------------------
+        # FnO STOCK FILTER
+        # ----------------------------------------------------
+
         allowed_fno = {
             s.replace("NSE:", "").replace("-EQ", "")
             for s in SECTOR_MAP.get(map_key, [])
         }
 
         for sym, pct in stocks.items():
+
             if sym in allowed_fno:
                 selected_stocks.add(f"NSE:{sym}-EQ")
 
+        # NSE rate limit protection
         time.sleep(0.2)
+
+    # ------------------------------------------------------------
+    # SECTOR RANKING
+    # ------------------------------------------------------------
+
+    buy_sectors = [s for s in strong_sectors if s["bias"] == "BUY"]
+    sell_sectors = [s for s in strong_sectors if s["bias"] == "SELL"]
+
+    # Highest advance first
+    buy_sectors.sort(
+        key=lambda x: x["up_pct"],
+        reverse=True
+    )
+
+    # Highest decline first
+    sell_sectors.sort(
+        key=lambda x: x["down_pct"],
+        reverse=True
+    )
+
+    strong_sectors = buy_sectors + sell_sectors
 
     return {
         "timestamp": datetime.now().strftime("%H:%M:%S"),
